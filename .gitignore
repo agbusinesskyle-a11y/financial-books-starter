@@ -1,0 +1,14 @@
+node_modules/
+.env
+.env.*
+!.env.example
+*.log
+*.dump
+*.backup
+*.sql.gz
+exports/
+imports/
+*.xlsx
+*.csv
+*.qbo
+*.iif

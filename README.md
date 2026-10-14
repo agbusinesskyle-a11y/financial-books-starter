@@ -1,0 +1,178 @@
+# Financial Books
+
+A bookkeeping app for small businesses that works like QuickBooks Online. It keeps double-entry books for one or more
+companies. You can use it on a computer or a phone, and it can be installed from Chrome as an app. It runs on your own
+computer, or on a server you rent, with your own Postgres database. Nothing is shared with anyone else.
+
+This is a **starter copy**. It comes with no data. You start your own empty books, and you can look at made-up sample
+books first if you like.
+
+Licensed under the MIT License (see `LICENSE`).
+
+## What's included
+
+- **Customers and sales**: customer list and customer pages, invoices, sales receipts, credit memos, estimates, receiving
+  payments, deposits, statements, recurring invoices, late fees, projects, documents, PDF printing and emailing.
+- **Vendors and spending**: bills (with optional approval), expenses, checks (including printing), vendor credits, paying
+  bills, scheduled payments, purchase orders, and 1099 summaries.
+- **Inventory**: items tracked at average cost, with stock counts and reorder points.
+- **Accounting**: chart of accounts, journal entries, registers, reconciling, transfers, budgets, classes and locations,
+  multiple currencies, and an audit log.
+- **Reports**: Profit and Loss, Balance Sheet, Cash Flow, aging, sales and expense reports, dashboards, KPIs, a cash
+  plan, saved and scheduled reports, and Excel/PDF/CSV export.
+- **Several companies in one set of books**, plus **users** with roles. Each person signs in with a password and an
+  authenticator app.
+- **QuickBooks Online import**: brings a company's full history over from QuickBooks' export files.
+- **Optional connectors**, all off until you set them up: email (your own mail server), bank feeds, text-a-receipt
+  (Twilio), and AI help (Claude or OpenRouter). See [Optional connectors](#optional-connectors).
+
+## Set it up on your computer
+
+If you have Claude (or another coding assistant), you can hand it [SETUP-FOR-CLAUDE.md](SETUP-FOR-CLAUDE.md) and it
+will run these steps for you.
+
+### 1. Install the tools (once)
+
+- **Node.js 22**, version 22.9 or newer: <https://nodejs.org> (the "LTS" installer). Check it with `node -v`.
+- **PostgreSQL 16 or newer**: <https://www.postgresql.org/download/>. The installer asks for a password for the
+  `postgres` superuser. Remember it, because you need it once in step 3.
+- **Git**, if you're getting this from GitHub: <https://git-scm.com>.
+
+### 2. Get the code and install its packages
+
+```bash
+git clone <this repository's address> financial-books
+cd financial-books
+npm ci
+```
+
+### 3. Make your settings file (your own secrets)
+
+```bash
+node scripts/setup-env.js
+```
+
+It asks for:
+
+- a short name for your books, such as `mybooks`
+- your name
+- a sign-in password, at least 12 characters (leave it empty and it makes one for you and shows it once)
+- the Postgres superuser address: `postgres://postgres:<your postgres password>@127.0.0.1:5432/postgres`
+
+Then it:
+
+- creates a database called `books`, and a login role `books_app` for the app with its own random password
+- writes everything into a file called `.env`
+- shows a **QR code**: scan it with an authenticator app (Google Authenticator, Microsoft Authenticator, 1Password, and
+  so on). The app then gives you the 6-digit sign-in codes.
+
+`.env` holds your secrets. Never share it and never commit it (it's already in `.gitignore`). Back it up in a password
+manager, because without its `SETTINGS_KEY`, passwords you save in Settings can't be read again. The script never
+overwrites an existing `.env`. Every setting is explained in `.env.example`.
+
+### 4. Create the tables
+
+```bash
+npm run migrate
+```
+
+### 5. Start your own books
+
+```bash
+npm run new-books -- --company "Your Company LLC" --tz America/Chicago
+```
+
+This creates your books with one empty company. The company gets a standard chart of accounts (checking, savings,
+credit card, the usual income and expense accounts, plus the built-in ones such as Accounts Receivable, Accounts
+Payable, Undeposited Funds and Retained Earnings) and the usual payment terms. You can change all of these afterwards.
+For the time zone, use your own, for example `America/New_York`, `America/Denver` or `America/Los_Angeles`.
+
+To add more companies later, open the gear menu and choose **Companies** (the page is `/settings/companies`).
+
+### 6. Run it and sign in
+
+```bash
+npm run dev
+```
+
+Open <http://127.0.0.1:3000>. On the sign-in page, **leave the email empty**. That's the owner sign-in. Enter your
+password and the 6-digit code from your authenticator app. Then fill in **Settings → Company** (name, address, logo).
+
+To stop the app, press Ctrl+C. Run `npm run dev` again to start it.
+
+### Optional: look at the sample books
+
+The sample books are a made-up feed store with customers, vendors, inventory and a year of activity. They're kept in
+their own books, called `sample`, so they never mix with yours.
+
+```bash
+npm run seed
+APP_ORG=sample npm run dev            # on Windows PowerShell: $env:APP_ORG='sample'; npm run dev
+```
+
+Run plain `npm run dev` to go back to your own books. Running `npm run seed` again rebuilds the sample from scratch.
+
+### Optional: bring a company over from QuickBooks Online
+
+In QuickBooks, go to **Settings → Export data** and export all dates. Put the files in a folder. Read the top of
+`lib/import/qbo-read.js` first: it lists the exact files the import needs. Then run:
+
+```bash
+npm run import-qbo -- "<path to the export folder>" --company "Your Company LLC" --check    # reads the files only
+npm run import-qbo -- "<path to the export folder>" --company "Your Company LLC"
+```
+
+The import checks every account against QuickBooks' Trial Balance and refuses to finish if anything is off by even a
+cent. It creates the company in your books, so if you only want the imported company, you don't need step 5. Keep
+export files out of this folder, or in a folder named `imports/` or `exports/`, which git ignores.
+
+## Optional connectors
+
+All of these are **off** until you turn them on. Most are set up inside the app, and what you type there is stored
+encrypted with your `SETTINGS_KEY`.
+
+| Connector | Where | What you need |
+|---|---|---|
+| Email (invoices, statements, reminders) | Settings → Email | Your mail provider's SMTP server, user and password. Until then, emails are only recorded, not sent. |
+| Bank feeds | `.env` (`LEDGERLINE_URL`, `LEDGERLINE_ORG_ID`), then Settings → Bank connections | Your own bank-data database (for example filled by a Plaid sync). See **[BANK-FEED-CONTRACT.md](BANK-FEED-CONTRACT.md)**, which also shows how to try it with sample data. |
+| Text-a-receipt | Settings → Text receipts | Your own Twilio account and phone number. Your app must be reachable on the internet (see hosting below). |
+| AI (vendor research, reading receipts and bills) | Settings → AI | An API key from Anthropic (Claude) or OpenRouter. |
+| Online payments | Settings → Payments | Only a built-in **test** processor exists for now (no real money moves). |
+
+## Run the tests
+
+The tests need a Postgres superuser address. Each test file creates its own throwaway database and drops it afterwards.
+
+```bash
+TEST_DATABASE_URL=postgres://postgres:<password>@127.0.0.1:5432/postgres npm test
+# PowerShell: $env:TEST_DATABASE_URL='postgres://postgres:<password>@127.0.0.1:5432/postgres'; npm test
+```
+
+## Later: your own hosted copy (optional)
+
+If you want to use it from anywhere, you can run it on any host that runs Node.js with a Postgres database, such as
+Railway, Render or Fly.io, or a small server of your own. `railway.json` is an example configuration for Railway. In
+outline:
+
+1. Create a Postgres database on the host. Using its superuser address, run
+   `DATABASE_URL=<superuser address> node scripts/create-app-role.js` **before** anything else. It prints the address
+   of a normal login role. Use that address as the app's `DATABASE_URL`. The app refuses to run as the superuser.
+2. Set the environment variables in the host's settings, never in the code: `NODE_ENV=production`,
+   `DATABASE_URL`, `APP_ORG`, `SETTINGS_KEY`, `APP_LOGIN_PASSWORD_HASH`, `APP_TOTP_SECRET`,
+   `APP_BASE_URL=https://<your address>`, and `TRUST_PROXY=1`. Make **new** secrets for the hosted copy:
+   `node scripts/setup-env.js --database-url <the app role address> --out .env.hosted` makes them, and you then delete
+   that file.
+3. The start command is `npm start`. It runs the migrations, then the app. The health check is `/healthz`.
+4. Run `npm run new-books -- --company "…"` once against the hosted database (or import from QuickBooks).
+
+Keep backups of the hosted database. Most hosts offer automatic backups.
+
+## How it's built (for whoever maintains it)
+
+- Node 22, plain `node:http`, `pg`, server-rendered HTML. There is no front-end framework and no build step.
+- `migrations/` holds plain SQL, applied in order by `npm run migrate`. `lib/data/` holds all database access,
+  `lib/views/` the pages, `lib/reports/` the reports, and `services/app/` the routes. Tests are in `test/` (`node:test`).
+- Money is stored as whole cents. Every transaction posts balanced debits and credits, and the database refuses
+  anything out of balance.
+- `BOOKS_MODE=practice` marks a practice copy kept alongside another system. It sends no emails or texts, takes no
+  payments and runs no automatic jobs. Leave it unset for normal books.

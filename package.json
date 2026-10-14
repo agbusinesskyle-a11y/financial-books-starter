@@ -1,0 +1,34 @@
+{
+  "name": "financial-books-starter",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.9"
+  },
+  "scripts": {
+    "setup": "node scripts/setup-env.js",
+    "migrate": "node --env-file-if-exists=.env services/migrate/index.js",
+    "new-books": "node --env-file-if-exists=.env scripts/new-books.js",
+    "seed": "node --env-file-if-exists=.env scripts/seed.js",
+    "bank-sample": "node --env-file-if-exists=.env scripts/ledgerline-sample.js",
+    "start": "node services/migrate/index.js && node services/app/index.js",
+    "dev": "node --env-file-if-exists=.env services/app/index.js",
+    "test": "node --test --test-concurrency=1 test/*.test.js",
+    "jobs": "node --env-file-if-exists=.env services/jobs/index.js",
+    "import-qbo": "node --env-file-if-exists=.env scripts/import-qbo.js"
+  },
+  "dependencies": {
+    "bcryptjs": "3.0.3",
+    "exceljs": "4.4.0",
+    "nodemailer": "10.0.16",
+    "otpauth": "9.5.2",
+    "pdfkit": "0.20.2",
+    "pg": "8.23.1",
+    "qrcode-generator": "2.0.4"
+  },
+  "overrides": {
+    "uuid": "11.1.1"
+  }
+}
