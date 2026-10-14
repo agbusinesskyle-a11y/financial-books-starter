@@ -1,6 +1,7 @@
 import { createPool } from '../lib/db.js';
 import { readQboExport } from '../lib/import/qbo-read.js';
 import { importQboCompany } from '../lib/import/qbo-import.js';
+import { refuseDemoDatabase } from '../lib/data/demo.js';
 
 // Stage B7: node --env-file=.env scripts/import-qbo.js <export folder> [--org <slug, default APP_ORG>] --company "<name>" [--tz America/Denver]
 //   [--accept "<QuickBooks account name>|A/R open items|A/P open items" (repeatable)] [--check]
@@ -17,6 +18,7 @@ try {
   console.log(`read: ${data.accounts.length} accounts, ${data.customers.length} customers, ${data.vendors.length} vendors, ${data.employees.length} employees, `
     + `${data.txns.length} transactions (${data.txns[0]?.date} – ${data.txns.at(-1)?.date}), ${data.openItems.length} open items`);
   if (args.includes('--check')) process.exit(0);
+  await refuseDemoDatabase(pool);
   const slug = opt('org') ?? process.env.APP_ORG;
   if (!/^[a-z0-9_]+$/.test(slug ?? '')) throw new Error('Give the books’ short name with --org (or set APP_ORG).');
   // A first import into new books creates the organization too.

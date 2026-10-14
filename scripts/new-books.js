@@ -1,5 +1,6 @@
 import { createPool } from '../lib/db.js';
 import { startBooks } from '../lib/data/companies.js';
+import { refuseDemoDatabase } from '../lib/data/demo.js';
 
 // Starts your own, empty books: the organization named by APP_ORG and its first company, with a standard chart of
 // accounts and payment terms. Run once, after npm run migrate:
@@ -14,6 +15,7 @@ if (!company) {
 }
 const pool = createPool();
 try {
+  await refuseDemoDatabase(pool);
   const { entityId } = await startBooks(pool, { slug: process.env.APP_ORG, orgName: opt('org-name'), companyName: company,
     timeZone: opt('tz') ?? 'America/Chicago' });
   console.log(`new-books: “${company}” is ready (company ${entityId}) in the books “${process.env.APP_ORG}”. Start the app with npm run dev.`);

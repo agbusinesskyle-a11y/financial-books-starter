@@ -3,7 +3,11 @@ import { isPractice, checkBooksMode, practiceBanner } from '../../lib/domain/pra
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { createPool } from '../../lib/db.js';
-import { HttpError, idParam, clientIp } from './http.js';
+import { HttpError, idParam, clientIp, tooMany } from './http.js';
+import {
+  isDemo, checkDemoMode, demoBanner, demoBlock, demoPublicBlock, DEMO_ACTOR, DEMO_ROBOTS, DEMO_UPLOADS_OFF, DEMO_WRITES_PER_IP, DEMO_WRITES_ALL,
+} from '../../lib/domain/demo.js';
+import { guardDatabase } from '../../lib/data/demo.js';
 import { vendorRoutes, VENDOR_UPLOAD_PATH } from './vendor-routes.js';
 import { publicVendorInfo } from './vendor-auto-routes.js';
 import { userRoutes, publicInvite, COMPANY_UPLOAD_PATH } from './user-routes.js';
@@ -214,14 +218,24 @@ function parseApplications(apply) {
 // `mailer` forces one mailer for every send (tests); otherwise each company's Settings → Email decides.
 // `makeTransport` replaces nodemailer's SMTP transport (tests).
 export function createApp({ pool, env = process.env, now = () => new Date(), mailer = null, makeTransport = undefined, ledgerline = null, aiFetch = undefined, smsFetch = undefined }) {
+  // The public demo (lib/domain/demo.js): no sign-in, and nothing reaches the outside world — no bank-data source, no AI
+  // or Twilio calls, and every email only recorded (mailerFor; an injected mailer is ignored too).
+  const demo = isDemo(env);
+  if (demo) {
+    checkDemoMode(env); // refuses a real server's settings
+    const off = () => Promise.reject(new Error('This is turned off in the public demo.'));
+    ledgerline = null; aiFetch = off; smsFetch = off; mailer = null;
+    makeTransport = () => { throw new Error('Email is never sent from the public demo.'); };
+  }
   const orgSlug = env.APP_ORG || 'sample';
   const httpsOnly = /^https:\/\//.test(env.APP_BASE_URL ?? '');
   // Every write the app makes is recorded in the audit log under the person making it.
   trackActor(pool);
-  const auth = createAuth({ env, now: () => now().getTime(),
+  const auth = createAuth({ env, demo, now: () => now().getTime(),
     verifyUser: ({ email, password, code }) => checkSignIn(pool, { orgSlug, email, password, code, key: settingsKey(env), now: now() }) });
   // The break-glass owner (environment login, or DEV_NO_AUTH): always an admin.
-  const owner = { userId: null, name: env.APP_OPERATOR_NAME || 'operator', role: 'admin', canApproveBills: true, owner: true };
+  // In the public demo every visitor is this owner, named "Demo visitor" in the audit log.
+  const owner = { userId: null, name: demo ? DEMO_ACTOR : env.APP_OPERATOR_NAME || 'operator', role: 'admin', canApproveBills: true, owner: true };
 
   // The company this request works in: the one chosen in the session (Switch company), if the person may open it, else
   // the first they may open. `companies` lists every company they can switch to.
@@ -247,16 +261,18 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
       orgAdmin: !who || who.owner || (who.role === 'admin' && who.allCompanies !== false) };
   }
 
-  // A practice copy says so on every HTML page it sends — signed in or not, errors included (lib/domain/practice.js).
+  // A practice copy says so on every HTML page it sends — signed in or not, errors included (lib/domain/practice.js); so
+  // does the public demo (lib/domain/demo.js), which also asks search engines to keep out.
   const practice = isPractice(env);
+  const banner = practice ? practiceBanner() : demo ? demoBanner() : null;
   const marked = (body, type) => {
-    if (!practice || !/^text\/html/.test(type) || Buffer.isBuffer(body)) return body;
+    if (!banner || !/^text\/html/.test(type) || Buffer.isBuffer(body)) return body;
     const s = String(body);
-    if (!s || s.includes('class="practice-banner"')) return s;
-    return /<body[^>]*>/.test(s) ? s.replace(/<body[^>]*>/, open => open + practiceBanner()) : practiceBanner() + s;
+    if (!s || s.includes('class="practice-banner')) return s;
+    return /<body[^>]*>/.test(s) ? s.replace(/<body[^>]*>/, open => open + banner) : banner + s;
   };
   function send(res, status, body, headers = {}) {
-    const all = { ...SECURITY_HEADERS, ...(httpsOnly ? { 'Strict-Transport-Security': 'max-age=31536000' } : {}),
+    const all = { ...SECURITY_HEADERS, ...(httpsOnly ? { 'Strict-Transport-Security': 'max-age=31536000' } : {}), ...(demo ? { 'X-Robots-Tag': 'noindex, nofollow' } : {}),
       'Cache-Control': 'no-store', 'Content-Type': 'text/html; charset=utf-8', ...headers };
     res.writeHead(status, all);
     const out = marked(body, all['Content-Type']);
@@ -271,6 +287,13 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
     const query = Object.fromEntries(url.searchParams);
 
     if (req.method === 'GET' && path === '/healthz') return send(res, 200, 'ok', { 'Content-Type': 'text/plain' });
+    if (demo) {
+      if (req.method === 'GET' && path === '/robots.txt') return send(res, 200, DEMO_ROBOTS, { 'Content-Type': 'text/plain; charset=utf-8' });
+      // Nobody signs in or out of the demo; links that reach outside people or services are closed.
+      if (path === '/login' || path === '/logout') return redirect(res, '/');
+      const closed = demoPublicBlock(path);
+      if (closed) { setActor(DEMO_ACTOR); throw new HttpError(403, closed); }
+    }
 
     if (req.method === 'GET' && path.startsWith('/public/')) {
       const name = path.slice('/public/'.length);
@@ -336,6 +359,18 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
     const overrideOk = () => who.role === 'admin' && form?.get('edit_reconciled') === '1';
     if (!canAccess(who.role, req.method, path)) {
       throw new HttpError(403, who.role === 'reports' && req.method !== 'GET' ? 'Your role can look but not change anything.' : 'Your role doesn’t include this page. Ask an admin if you need it.');
+    }
+    // The public demo: what could store a secret, reach outside or change how the server runs is closed (with the reason),
+    // uploads are refused before they're read, and writes are rate limited per visitor address and overall.
+    if (demo) {
+      const why = demoBlock(req.method, path);
+      if (why) throw new HttpError(403, why);
+      if (req.method === 'POST') {
+        if (boundaryOf(req.headers['content-type'])) throw new HttpError(403, DEMO_UPLOADS_OFF);
+        if (tooMany(`demo-write:${clientIp(req, env)}`, DEMO_WRITES_PER_IP) || tooMany('demo-write:all', DEMO_WRITES_ALL)) {
+          throw new HttpError(429, 'That’s a lot of changes in a short time for this public demo. Wait a few minutes and try again.');
+        }
+      }
     }
     const flashNext = (kind, text) => { session.flash = { kind, text }; };
     const takeFlash = () => { const f = session.flash ?? null; session.flash = null; return f; };
@@ -434,7 +469,8 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
     };
     const companyMailer = () => (mailer ? Promise.resolve(mailer) : mailerFor(pool, { ...scope, env, makeTransport }));
     const mailKind = async () => (mailer ? mailer.kind : (await getEmailSettings(pool, scope)).mode === 'smtp' ? 'smtp' : 'log');
-    const sentText = (what, status) => ({ sent: `${what} emailed.`, logged: `${what} recorded as sent. Email isn’t set up yet (Settings → Email), so nothing actually went out.`,
+    const sentText = (what, status) => ({ sent: `${what} emailed.`, logged: demo ? `${what} recorded as sent. This is the public demo, so no email actually went out.`
+      : `${what} recorded as sent. Email isn’t set up yet (Settings → Email), so nothing actually went out.`,
       failed: `${what} could not be sent. See Conversations for the error.` })[status];
 
     // The customer page. `forms` carries values and errors to re-show (statement form, compose, reply).
@@ -1273,7 +1309,7 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
       const status = error instanceof HttpError ? error.status : locked ? 409 : 500;
       if (status === 500) console.error(`request failed: ${req.method} ${req.url?.split('?')[0]}: ${error.stack || error.message}`);
       if (res.headersSent) { res.end(); return; }
-      const title = { 409: 'Imported from QuickBooks', 400: 'Bad request', 401: 'Sign in required', 403: 'Not allowed', 404: 'Not found', 405: 'Not allowed', 413: 'Too large', 415: 'Not supported', 503: 'Not ready' }[status] ?? 'Something went wrong';
+      const title = { 409: 'Imported from QuickBooks', 400: 'Bad request', 401: 'Sign in required', 403: demo ? 'Not in the demo' : 'Not allowed', 404: 'Not found', 405: 'Not allowed', 413: 'Too large', 415: 'Not supported', 429: 'Slow down', 503: 'Not ready' }[status] ?? 'Something went wrong';
       const message = status === 500 ? 'The server hit an error. What it was doing may not have finished; check before trying again.' : error.message;
       send(res, status, String(messagePage({ title, message })));
     }
@@ -1282,22 +1318,32 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
 
 export async function main(env = process.env) {
   console.log(`books mode: ${checkBooksMode(env)}`);
+  // DEMO_MODE=1: the public demo (lib/domain/demo.js). A typo, or a real server's settings alongside it, stops here.
+  let demo;
+  try { demo = checkDemoMode(env) === 'demo'; } catch (error) { console.error(error.message); process.exit(1); }
+  if (demo) console.log('public demo: no sign-in, the sample books only, nothing sent; reset nightly by npm run demo-reset');
   // Emailed links (invites, password resets, pay links) must use the real address, never the request's Host header.
   if (env.NODE_ENV === 'production' && !/^https:\/\//.test(env.APP_BASE_URL ?? '')) {
     console.error('APP_BASE_URL must be set to the https:// address of the app in production.');
     process.exit(1);
   }
   const pool = createPool(env);
+  // A demo only on a database made by demo-reset; normal books never on one (lib/data/demo.js).
+  try { await guardDatabase(pool, env); } catch (error) {
+    console.error(error.message);
+    await pool.end();
+    process.exit(1);
+  }
   const port = Number(env.PORT || 3000);
   const host = env.HOST || (env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1');
   // Bank feeds read ledgerline (read-only) when LEDGERLINE_URL is set.
-  const ledgerline = ledgerlinePool(env);
+  const ledgerline = demo ? null : ledgerlinePool(env);
   if (ledgerline && env.LEDGERLINE_ORG_ID) await assignTenant(pool, { orgSlug: env.APP_ORG || 'sample', llOrgId: env.LEDGERLINE_ORG_ID });
   const server = http.createServer(createApp({ pool, env, ledgerline }));
   server.listen(port, host, () => console.log(`financial-books listening on http://${host}:${port}`));
   // Daily jobs (recurring transactions, late fees): shortly after start, then hourly. Every run is
   // idempotent, so hourly just means "within an hour of midnight". RUN_JOBS=0 turns this off.
-  if (env.RUN_JOBS !== '0') {
+  if (env.RUN_JOBS !== '0' && !demo) {
     const tick = () => runDailyJobs({ pool, env, log: console.log }).catch(error => console.error(`jobs failed: ${error.stack || error.message}`));
     setTimeout(tick, 10_000).unref();
     setInterval(tick, 60 * 60 * 1000).unref();

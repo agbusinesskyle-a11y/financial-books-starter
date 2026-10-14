@@ -17,7 +17,9 @@
     "dev": "node --env-file-if-exists=.env services/app/index.js",
     "test": "node --test --test-concurrency=1 test/*.test.js",
     "jobs": "node --env-file-if-exists=.env services/jobs/index.js",
-    "import-qbo": "node --env-file-if-exists=.env scripts/import-qbo.js"
+    "import-qbo": "node --env-file-if-exists=.env scripts/import-qbo.js",
+    "demo-reset": "node --env-file-if-exists=.env scripts/demo-reset.js",
+    "demo-start": "node scripts/demo-reset.js --if-new && node services/migrate/index.js && node services/app/index.js"
   },
   "dependencies": {
     "bcryptjs": "3.0.3",

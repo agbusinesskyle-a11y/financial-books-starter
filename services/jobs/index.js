@@ -14,6 +14,8 @@ import { setShowAccountNumbers } from '../../lib/views/accounts.js';
 import { withDisplay } from '../../lib/domain/display.js';
 import { runReportSchedules } from '../../lib/reports/schedule.js';
 import { runManagementSchedules } from '../../lib/reports/management.js';
+import { isDemo, checkDemoMode } from '../../lib/domain/demo.js';
+import { guardDatabase } from '../../lib/data/demo.js';
 
 // Daily jobs for every company: recurring transactions (customer and vendor), late fees, invoice reminders, scheduled bill payments, scheduled report emails. Each company's "today" is in
 // its own time zone. Safe to run as often as you like (hourly from the app, or `npm run jobs`):
@@ -24,6 +26,8 @@ const LOCK_KEY = 815_215_001;
 export async function runDailyJobs({ pool, env = process.env, now = () => new Date(), makeTransport, mailer = null, log = () => {} }) {
   // A practice copy creates, charges and sends nothing on its own (lib/domain/practice.js).
   if (isPractice(env)) { log('jobs: practice copy — daily jobs are off'); return { practice: true }; }
+  // Neither does the public demo: nothing is created, charged or sent while nobody is looking (lib/domain/demo.js).
+  if (isDemo(env)) { log('jobs: public demo — daily jobs are off'); return { demo: true }; }
   const lock = await pool.connect();
   try {
     const { rows: [{ ok }] } = await lock.query('SELECT pg_try_advisory_lock($1) AS ok', [LOCK_KEY]);
@@ -90,8 +94,10 @@ export async function runDailyJobs({ pool, env = process.env, now = () => new Da
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   checkBooksMode();
+  checkDemoMode();
   const pool = createPool();
   try {
+    await guardDatabase(pool);
     await runDailyJobs({ pool, log: console.log });
   } catch (error) {
     console.error(`jobs failed: ${error.stack || error.message}`);
