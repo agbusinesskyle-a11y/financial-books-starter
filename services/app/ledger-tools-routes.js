@@ -202,7 +202,7 @@ export async function ledgerToolsRoutes(h) {
       }
       return true;
     }
-    const ids = form.getAll('ids').filter(x => /^\d{1,18}$/.test(x)).map(Number).slice(0, 5000);
+    const ids = [...new Set(form.getAll('ids').filter(x => /^\d{1,18}$/.test(x)).map(Number))].slice(0, 5000);
     const statementDate = form.get('statement_date') ?? '', ending = form.get('ending') ?? '';
     try {
       const recId = await finishReconciliation(pool, { ...scope, accountId, statementDate, endingText: ending, txnIds: ids, actor });

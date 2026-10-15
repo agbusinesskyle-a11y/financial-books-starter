@@ -311,7 +311,7 @@ export async function vendorTxnRoutes(h) {
       return true;
     }
     const v = { accountId: String(form.get('account_id') ?? ''), txnDate: String(form.get('txn_date') ?? ''), method: String(form.get('method') ?? ''),
-      checkNo: String(form.get('check_no') ?? ''), memo: String(form.get('memo') ?? ''), selected: form.getAll('bill').map(idParam).filter(Boolean), pay: {}, credit: {},
+      checkNo: String(form.get('check_no') ?? ''), memo: String(form.get('memo') ?? ''), selected: [...new Set(form.getAll('bill').map(idParam).filter(Boolean))].slice(0, 500), pay: {}, credit: {},
       rates: {} };
     for (const [k, val] of form) {
       if (/^rate_[A-Z]{3}$/.test(k)) v.rates[k.slice(5)] = val.trim();

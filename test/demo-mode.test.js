@@ -23,15 +23,17 @@ const pool = () => db.pool;
 const one = async (sql, args) => (await pool().query(sql, args)).rows[0];
 const n = async (sql, args) => Number((await one(sql, args)).n);
 
-// A visitor's browser: keeps the session cookie, nothing else.
+// A visitor's browser: keeps the session cookie, and comes from its own address (via the trusted proxy header).
+let visitors = 0;
 function visitor() {
   let cookie = '';
+  const from = { 'x-forwarded-for': `198.51.100.${++visitors}` };
   const keep = res => { const c = (res.headers.getSetCookie?.() ?? []).map(x => x.split(';')[0]).join('; '); if (c) cookie = c; return res; };
   const v = {
-    get: path => fetch(base + path, { redirect: 'manual', headers: { cookie } }).then(keep),
+    get: path => fetch(base + path, { redirect: 'manual', headers: { cookie, ...from } }).then(keep),
     post: (path, body = {}) => fetch(base + path, { method: 'POST', redirect: 'manual', body: new URLSearchParams({ csrf: v.csrf ?? '', ...body }).toString(),
-      headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' } }).then(keep),
-    raw: (path, init = {}) => fetch(base + path, { redirect: 'manual', ...init, headers: { cookie, ...init.headers } }).then(keep),
+      headers: { cookie, ...from, 'content-type': 'application/x-www-form-urlencoded' } }).then(keep),
+    raw: (path, init = {}) => fetch(base + path, { redirect: 'manual', ...init, headers: { cookie, ...from, ...init.headers } }).then(keep),
     async start() {
       const res = await v.get('/customers');
       v.csrf = /name="csrf" value="([0-9a-f]+)"/.exec(await res.text())?.[1];
@@ -44,7 +46,7 @@ function visitor() {
 before(async () => {
   db = await freshDb();
   await resetDemo(pool(), { env: DEMO, asOf: AS_OF });
-  const app = createApp({ pool: pool(), env: DEMO, now: () => new Date(`${AS_OF}T17:00:00Z`),
+  const app = createApp({ pool: pool(), env: { ...DEMO, TRUST_PROXY: '1' }, now: () => new Date(`${AS_OF}T17:00:00Z`), demoCheckMs: 10 * 60_000,
     // Both are ignored in the demo: no test mailer, no SMTP transport, no AI.
     mailer: { kind: 'smtp', from: 'x@example.com', send: async () => { transports++; return { status: 'sent' }; } },
     makeTransport: () => { transports++; return { sendMail: async () => ({}) }; },
@@ -107,7 +109,7 @@ test('interlock: a database not made by demo-reset is refused, and so is a demo 
     ['online payments', `INSERT INTO payments_settings (org_id, entity_id, enabled) VALUES (${org}, ${entity}, true)`, /online payments turned on/],
     ['a vendor tax ID', `UPDATE vendor SET tax_id_enc = 'v1:x:y:z' WHERE vendor_id = ${vendor}`, /stored secrets \(vendor\.tax_id_enc: 1\)/],
     ['a company EIN', `UPDATE entity SET ein_enc = 'v1:x:y:z' WHERE entity_id = ${entity}`, /stored secrets \(entity\.ein_enc: 1\)/],
-    ['a copied demo', `UPDATE demo_marker SET database_name = 'somewhere_else'`, /mark names another database \("somewhere_else"\)/],
+    ['a copied demo', `UPDATE demo_marker SET database_name = 'somewhere_else'`, /mark belongs to another database \("somewhere_else"\)/],
     ['no mark', 'DELETE FROM demo_marker', /no demo mark/],
   ];
   for (const [what, sql, expected] of cases) {
@@ -206,13 +208,13 @@ test('each closed area answers with a clear reason, and changes nothing', async 
     const res = await v.raw(path, { method: 'POST', body: form });
     assert.equal(res.status, 403, path);
     const html = await res.text();
-    assert.match(html, /File uploads is turned off in this public demo|company’s name, details and logo/, path);
+    assert.match(html, /File uploads is turned off in this public demo|company’s name, details and logo|Importing is turned off/, path);
   }
   assert.equal(await n('SELECT count(*) AS n FROM document'), 0);
   assert.equal(await n('SELECT (SELECT count(*) FROM app_user) + (SELECT count(*) FROM org) + (SELECT count(*) FROM entity) + (SELECT count(*) FROM email_settings) + (SELECT count(*) FROM ai_settings) AS n'), before);
   assert.equal(aiCalls, 0);
-  // What stays open: company settings that are just bookkeeping choices.
-  assert.equal(demoBlock('POST', '/settings/accounting'), null);
+  // What stays open: the company's lists (terms, products, accounts…) and everyday work.
+  assert.equal(demoBlock('POST', '/settings/terms'), null);
   assert.equal(demoBlock('GET', '/settings/company'), null);
   assert.equal(demoBlock('POST', '/customers'), null);
 });

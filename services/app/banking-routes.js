@@ -57,7 +57,7 @@ export async function bankingRoutes(h) {
     if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed');
     const account = accounts.find(a => a.id === form.get('account')) ?? (() => { throw new HttpError(404, 'Account not found'); })();
     const back = `/banking?account=${account.id}&tab=review`;
-    const ticked = form.getAll('item');
+    const ticked = [...new Set(form.getAll('item'))].slice(0, 1000);
     try {
       if (form.get('action') === 'exclude') {
         const n = await excludeItems(pool, { ...scope, itemIds: ticked, actor });

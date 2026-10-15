@@ -6,8 +6,9 @@ import { createPool } from '../../lib/db.js';
 import { HttpError, idParam, clientIp, tooMany } from './http.js';
 import {
   isDemo, checkDemoMode, demoBanner, demoBlock, demoPublicBlock, DEMO_ACTOR, DEMO_ROBOTS, DEMO_UPLOADS_OFF, DEMO_WRITES_PER_IP, DEMO_WRITES_ALL,
+  DEMO_HEAVY, DEMO_BULK, DEMO_MGMT_SECTIONS, DEMO_HEAVY_PER_IP, DEMO_HEAVY_ALL, DEMO_HEAVY_AT_ONCE, DEMO_REPORT_YEARS, DEMO_BATCH_MAX, DEMO_FORMS_PER_SESSION, DEMO_CHECK_MS,
 } from '../../lib/domain/demo.js';
-import { guardDatabase } from '../../lib/data/demo.js';
+import { guardDatabase, demoProblems, readMarker } from '../../lib/data/demo.js';
 import { vendorRoutes, VENDOR_UPLOAD_PATH } from './vendor-routes.js';
 import { publicVendorInfo } from './vendor-auto-routes.js';
 import { userRoutes, publicInvite, COMPANY_UPLOAD_PATH } from './user-routes.js';
@@ -124,6 +125,9 @@ const MAX_FORM_BYTES = 64 * 1024;
 const RECENT_MAX = 8;
 const BATCH_MAX = 200;
 const SALES_TYPES = ['invoice', 'sales_receipt', 'credit_memo', 'estimate'];
+// The one-time form id the forms render (lib/views/forms.js csrfField): 12 random bytes, base64url. Nothing else is kept.
+const FORM_ONCE = /^[A-Za-z0-9_-]{16}$/;
+const DEMO_TOO_MANY_WRITES = 'That’s a lot of changes in a short time for this public demo. Wait a few minutes and try again.';
 const NEW_TYPES = [...SALES_TYPES, 'payment'];
 
 
@@ -217,7 +221,10 @@ function parseApplications(apply) {
 
 // `mailer` forces one mailer for every send (tests); otherwise each company's Settings → Email decides.
 // `makeTransport` replaces nodemailer's SMTP transport (tests).
-export function createApp({ pool, env = process.env, now = () => new Date(), mailer = null, makeTransport = undefined, ledgerline = null, aiFetch = undefined, smsFetch = undefined }) {
+// demoCheckMs, demoHeavyAtOnce: how often the public demo re-checks its database, and how many expensive pages it builds at
+// once (tests change them).
+export function createApp({ pool, env = process.env, now = () => new Date(), mailer = null, makeTransport = undefined, ledgerline = null, aiFetch = undefined, smsFetch = undefined,
+  demoCheckMs = DEMO_CHECK_MS, demoHeavyAtOnce = DEMO_HEAVY_AT_ONCE }) {
   // The public demo (lib/domain/demo.js): no sign-in, and nothing reaches the outside world — no bank-data source, no AI
   // or Twilio calls, and every email only recorded (mailerFor; an injected mailer is ignored too).
   const demo = isDemo(env);
@@ -271,14 +278,40 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
     if (!s || s.includes('class="practice-banner')) return s;
     return /<body[^>]*>/.test(s) ? s.replace(/<body[^>]*>/, open => open + banner) : banner + s;
   };
+  // Every response's headers, streamed ones too (the attachments ZIP): security headers, no caching, noindex in the demo.
+  const headersFor = (headers = {}) => ({ ...SECURITY_HEADERS, ...(httpsOnly ? { 'Strict-Transport-Security': 'max-age=31536000' } : {}),
+    ...(demo ? { 'X-Robots-Tag': 'noindex, nofollow' } : {}), 'Cache-Control': 'no-store', 'Content-Type': 'text/html; charset=utf-8', ...headers });
   function send(res, status, body, headers = {}) {
-    const all = { ...SECURITY_HEADERS, ...(httpsOnly ? { 'Strict-Transport-Security': 'max-age=31536000' } : {}), ...(demo ? { 'X-Robots-Tag': 'noindex, nofollow' } : {}),
-      'Cache-Control': 'no-store', 'Content-Type': 'text/html; charset=utf-8', ...headers };
+    const all = headersFor(headers);
     res.writeHead(status, all);
     const out = marked(body, all['Content-Type']);
     res.end(typeof out === 'string' || Buffer.isBuffer(out) ? out : String(out));
   }
   const redirect = (res, location, headers = {}) => send(res, 303, '', { Location: location, ...headers });
+
+  // The public demo re-checks its database now and then (lib/data/demo.js): if it ever stops being a clean demo the app
+  // stops serving it, and when the nightly reset has run every visitor session starts afresh (nothing a visitor left in
+  // memory outlives the reset).
+  let demoCheck = { at: -Infinity, ok: false, resetAt: undefined }, demoChecking = null;
+  async function demoReady() {
+    if (Date.now() - demoCheck.at < demoCheckMs) return demoCheck.ok;
+    demoChecking ??= (async () => {
+      try {
+        const problems = await demoProblems(pool);
+        const resetAt = (await readMarker(pool))?.reset_at?.toISOString() ?? null;
+        if (demoCheck.resetAt !== undefined && resetAt !== demoCheck.resetAt) auth.reset();
+        if (problems.length && demoCheck.ok !== false) console.error(`demo: not serving — this database is no longer a clean demo: ${problems.join('; ')}`);
+        demoCheck = { at: Date.now(), ok: !problems.length, resetAt };
+      } catch (error) {
+        console.error(`demo: database check failed: ${error.message}`);
+        demoCheck = { ...demoCheck, at: Date.now(), ok: false };
+      } finally { demoChecking = null; }
+    })();
+    await demoChecking;
+    return demoCheck.ok;
+  }
+  // Expensive pages being built right now in the demo.
+  let heavyNow = 0;
   const pdf = (res, body, filename) => send(res, 200, body, { 'Content-Type': 'application/pdf', 'Content-Disposition': `inline; filename="${filename}"` });
 
   async function routes(req, res) {
@@ -293,6 +326,7 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
       if (path === '/login' || path === '/logout') return redirect(res, '/');
       const closed = demoPublicBlock(path);
       if (closed) { setActor(DEMO_ACTOR); throw new HttpError(403, closed); }
+      if (!(await demoReady())) throw new HttpError(503, 'The demo isn’t available right now. Try again in a few minutes.');
     }
 
     if (req.method === 'GET' && path.startsWith('/public/')) {
@@ -356,23 +390,41 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
     // The app's own address, for links in emails.
     const appOrigin = () => (env.APP_BASE_URL ? env.APP_BASE_URL.replace(/\/$/, '') : `http://${req.headers.host ?? '127.0.0.1'}`);
     // An admin ticked "change it anyway" on a reconciled transaction.
-    const overrideOk = () => who.role === 'admin' && form?.get('edit_reconciled') === '1';
+    // (Not in the public demo: a reconciled transaction stays as it is there.)
+    const overrideOk = () => who.role === 'admin' && !demo && form?.get('edit_reconciled') === '1';
     if (!canAccess(who.role, req.method, path)) {
       throw new HttpError(403, who.role === 'reports' && req.method !== 'GET' ? 'Your role can look but not change anything.' : 'Your role doesn’t include this page. Ask an admin if you need it.');
     }
     // The public demo: what could store a secret, reach outside or change how the server runs is closed (with the reason),
-    // uploads are refused before they're read, and writes are rate limited per visitor address and overall.
+    // uploads are refused before they're read, writes are rate limited per visitor address (and, once the form is known
+    // to be genuine, overall), and so are pages that take real work to build — of which only a few run at once.
     if (demo) {
       const why = demoBlock(req.method, path);
       if (why) throw new HttpError(403, why);
+      const ip = clientIp(req, env);
       if (req.method === 'POST') {
         if (boundaryOf(req.headers['content-type'])) throw new HttpError(403, DEMO_UPLOADS_OFF);
-        if (tooMany(`demo-write:${clientIp(req, env)}`, DEMO_WRITES_PER_IP) || tooMany('demo-write:all', DEMO_WRITES_ALL)) {
-          throw new HttpError(429, 'That’s a lot of changes in a short time for this public demo. Wait a few minutes and try again.');
+        if (tooMany(`demo-write:${ip}`, DEMO_WRITES_PER_IP)) throw new HttpError(429, DEMO_TOO_MANY_WRITES);
+      }
+      if (DEMO_HEAVY.test(path)) {
+        if (tooMany(`demo-heavy:${ip}`, DEMO_HEAVY_PER_IP) || tooMany('demo-heavy:all', DEMO_HEAVY_ALL)) {
+          throw new HttpError(429, 'That’s a lot of reports and downloads in a short time for this public demo. Wait a few minutes and try again.');
         }
+        if (heavyNow >= demoHeavyAtOnce) throw new HttpError(503, 'The demo is busy building other reports. Try again in a moment.');
+        // The slot is given back only when both the work (the request handler) and the response are finished — a visitor
+        // hanging up early doesn't free it while the report is still being built.
+        heavyNow++;
+        let open = 2;
+        const release = () => { if (--open === 0) heavyNow--; };
+        let handlerDone = false;
+        req.demoSlotDone = () => { if (!handlerDone) { handlerDone = true; release(); } };
+        // A visitor who hung up before the slot was taken (while the demo re-checked its database) already closed the
+        // response: that side is done now, or the slot would never come back.
+        if (res.destroyed || res.closed || req.destroyed) release();
+        else res.once('close', release);
       }
     }
-    const flashNext = (kind, text) => { session.flash = { kind, text }; };
+    const flashNext = (kind, text) => { session.flash = { kind, text: demo ? String(text ?? '').slice(0, 2000) : text }; };
     const takeFlash = () => { const f = session.flash ?? null; session.flash = null; return f; };
 
     let form = null, files = [];
@@ -390,10 +442,19 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
         }
       } else form = await readForm(req);
       if (!sameToken(form.get('csrf'), session.csrf)) throw new HttpError(403, 'This form expired. Reload the page and try again.');
+      if (demo && tooMany('demo-write:all', DEMO_WRITES_ALL)) throw new HttpError(429, DEMO_TOO_MANY_WRITES);
+      // A reconciled transaction can't be changed "anyway" in the demo, on any form.
+      if (demo) form.delete('edit_reconciled');
+      // Print, send and batch actions take at most a batch's worth of selections in the demo.
+      if (demo && DEMO_BULK.test(path)) {
+        const most = Math.max(0, ...[...new Set(form.keys())].map(k => form.getAll(k).length));
+        if (most > DEMO_BATCH_MAX) throw new HttpError(403, `The demo handles at most ${DEMO_BATCH_MAX} at a time. Choose fewer and try again.`);
+      }
       if (path === '/logout') return redirect(res, '/login', { 'Set-Cookie': auth.logout(req) });
       // The same rendered form sent twice (double tap, resend): the second is ignored. Checked and recorded in one
       // synchronous step, so two requests arriving together can't both pass; forgotten again if the first one failed.
-      const once = form.get('form_once');
+      // Only the id shape the forms render is remembered (a few bytes each), never whatever a request sends.
+      const once = FORM_ONCE.test(form.get('form_once') ?? '') ? form.get('form_once') : null;
       if (once) {
         session.formsUsed ??= new Map();
         if (session.formsUsed.has(once)) {
@@ -402,8 +463,9 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
           return redirect(res, back ?? '/');
         }
         session.formsUsed.set(once, Date.now());
-        if (session.formsUsed.size > 500) session.formsUsed.delete(session.formsUsed.keys().next().value);
-        res.on('finish', () => { if (res.statusCode >= 500) session.formsUsed.delete(once); });
+        while (session.formsUsed.size > (demo ? DEMO_FORMS_PER_SESSION : 500)) session.formsUsed.delete(session.formsUsed.keys().next().value);
+        // Forgotten again when nothing was done: a failure, or no such page.
+        res.on('finish', () => { if (res.statusCode >= 500 || res.statusCode === 404) session.formsUsed.delete(once); });
       }
     } else if (req.method !== 'GET') throw new HttpError(405, 'Method not allowed');
 
@@ -902,7 +964,8 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
     }
 
     // ---- vendors (and, from stage V3, their transactions) ----
-    const helpers = { req, res, path, query, form, files, ctx, scope, pool, env, page, base, go, takeFlash, actor, who, owner: auth.configured || auth.devNoAuth ? owner : null, send, extra, companyMailer, attempt, ledgerline, aiFetch, smsFetch, saveOpts, saveChoice, appOrigin };
+    const helpers = { req, res, path, query, form, files, ctx, scope, pool, env, page, base, go, takeFlash, actor, who, owner: auth.configured || auth.devNoAuth ? owner : null, send, extra, companyMailer, attempt, ledgerline, aiFetch, smsFetch, saveOpts, saveChoice, appOrigin,
+      headersFor, batchMax: demo ? DEMO_BATCH_MAX : 200, reportYears: demo ? DEMO_REPORT_YEARS : null, mgmtSections: demo ? DEMO_MGMT_SECTIONS : null };
     if (await companyRoutes({ ...helpers, session })) return;
     if (await bankFeedRoutes(helpers)) return;
     if (await bankingRoutes(helpers)) return;
@@ -1305,6 +1368,7 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
     try {
       await withActor(() => withDisplay(() => routes(req, res)));
     } catch (error) {
+      req.demoSlotDone?.();
       const locked = error?.code === 'P0001' && /^Imported from QuickBooks/.test(error.message ?? '');
       const status = error instanceof HttpError ? error.status : locked ? 409 : 500;
       if (status === 500) console.error(`request failed: ${req.method} ${req.url?.split('?')[0]}: ${error.stack || error.message}`);
@@ -1313,6 +1377,7 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
       const message = status === 500 ? 'The server hit an error. What it was doing may not have finished; check before trying again.' : error.message;
       send(res, status, String(messagePage({ title, message })));
     }
+    req.demoSlotDone?.();
   };
 }
 

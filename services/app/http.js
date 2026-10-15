@@ -5,15 +5,20 @@ export class HttpError extends Error {
 
 export const idParam = value => (/^\d{1,18}$/.test(String(value ?? '')) ? Number(value) : null);
 
-// Counts tries per key in a 10-minute window; true once `max` is passed. Used by the public (no sign-in) pages.
+// Counts tries per key in a 10-minute window; true once `max` is passed. Used by the public (no sign-in) pages and the
+// public demo. At most MAX_KEYS keys are kept: expired ones go first, then the oldest.
 const attempts = new Map(); // key -> { n, until }
+const MAX_KEYS = 50_000;
 export function tooMany(key, max, now = Date.now()) {
   if (attempts.size > 5000) for (const [k, a] of attempts) if (a.until <= now) attempts.delete(k);
+  while (attempts.size >= MAX_KEYS && !attempts.has(key)) attempts.delete(attempts.keys().next().value);
   const a = attempts.get(key);
   const next = a && a.until > now ? { n: a.n + 1, until: a.until } : { n: 1, until: now + 600_000 };
   attempts.set(key, next);
   return next.n > max;
 }
+// How many keys the limiter holds (tests).
+export const limiterKeys = () => attempts.size;
 
 // The client's address. Behind one reverse proxy set TRUST_PROXY=1: the right-most X-Forwarded-For entry is the address
 // that proxy saw (entries further left are whatever the client sent, so they can't be trusted).

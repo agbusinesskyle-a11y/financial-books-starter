@@ -69,7 +69,7 @@ test('several customers can have an opening balance; it can’t be edited into a
 test('the same form sent twice saves once', async () => {
   const cust = app.ids.customers.hilltop;
   const body = salesDoc('invoice', cust, [{ desc: 'Double tap', rate: '12.34' }]);
-  body.set('form_once', 'once-test-1');
+  body.set('form_once', 'once-test-000001'); // the shape the forms render (16 base64url characters)
   const [r1, r2] = await Promise.all([app.post('/txns', body), app.post('/txns', body)]);
   assert.deepEqual([r1.status, r2.status], [303, 303]);
   assert.equal((await one(`SELECT count(*)::int AS n FROM txn WHERE customer_id = $1 AND total_cents = 1234`, [cust])).n, 1);

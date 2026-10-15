@@ -31,7 +31,7 @@ export async function mgmtRoutes(h) {
     const mg = await getManagement(pool, { ...scope, mgmtId });
     if (!mg) throw new HttpError(404, 'Management report not found');
     if (m[2] === '.pdf' && req.method === 'GET') {
-      const pdf = await managementPdf(pool, { ...scope, mgmt: mg, today: ctx.today, timeZone: ctx.timeZone });
+      const pdf = await managementPdf(pool, { ...scope, mgmt: mg, today: ctx.today, timeZone: ctx.timeZone, maxSections: h.mgmtSections ?? null, maxYears: h.reportYears ?? null });
       send(res, 200, pdf.body, { ...extra, 'Content-Type': 'application/pdf', 'Content-Disposition': `inline; filename="${pdf.filename}"` });
       return true;
     }

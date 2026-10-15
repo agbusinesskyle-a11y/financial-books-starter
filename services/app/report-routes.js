@@ -112,7 +112,7 @@ export async function reportRoutes(h) {
   if (q === null && query.run !== '1') opts = { ...(await defaultQuery(pool, { ...scope, who, reportKey: def.key })), ...query };
   const savedNow = query.saved && /^\d{1,18}$/.test(query.saved) ? await getSaved(pool, { ...scope, savedId: Number(query.saved), who }) : null;
   const [{ report, accounts, note }, entity] = await Promise.all([
-    buildReport(pool, { ...scope, key: def.key, query: opts, today: ctx.today, timeZone: ctx.timeZone }), getEntity(pool, scope)]);
+    buildReport(pool, { ...scope, key: def.key, query: opts, today: ctx.today, timeZone: ctx.timeZone, maxYears: h.reportYears ?? null }), getEntity(pool, scope)]);
   const generatedAt = new Date().toLocaleString('en-US', { timeZone: ctx.timeZone, dateStyle: 'medium', timeStyle: 'short' });
   const show = async (more = {}, status = 200) => page(reportPage({ ...base(), flash: takeFlash(), report, accounts, note, saved: savedNow,
     favorite: (await favoritesOf(pool, scope, who)).has(def.key), canFavorite: true, canEdit: who.role !== 'reports', generatedAt, ...more }), status);

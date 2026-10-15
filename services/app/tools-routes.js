@@ -56,7 +56,7 @@ export async function toolsRoutes(h) {
   }
   if (path === '/export/documents.zip' && req.method === 'GET') {
     // Streamed: one file at a time, compressed off the main thread.
-    res.writeHead(200, { ...extra, 'Content-Type': 'application/zip', 'Content-Disposition': `attachment; filename="attachments-${ctx.today}.zip"`, 'Cache-Control': 'no-store' });
+    res.writeHead(200, h.headersFor({ ...extra, 'Content-Type': 'application/zip', 'Content-Disposition': `attachment; filename="attachments-${ctx.today}.zip"` }));
     try {
       await streamZip(res, documentFiles(pool, scope));
     } catch (error) {

@@ -174,42 +174,59 @@ app: create invoices, bills, payments, run reports, print PDFs and download expo
 **"Demo — sample data, anyone can see and change it. Resets every night."**, and every night the database is wiped and
 the clean sample is rebuilt, dated as of that day so the demo always looks current.
 
-`DEMO_MODE=1` turns it on. It can't be turned on for real books:
+`DEMO_MODE=1` turns it on. These safeguards keep it away from real books:
 
 - **The demo runs only on a database made by `npm run demo-reset`.** The reset writes a demo mark (the `demo_marker`
-  table) right after it wipes the database and rebuilds the sample, and it only ever wipes a database that is empty or
-  already a clean demo. It refuses anything with data and no mark ("it may be real books"), and it also refuses a demo
-  that somehow holds something a demo never makes. Either way nothing is changed and it exits with an error.
+  table, naming the database by name and by its internal id) right after it wipes the database and rebuilds the
+  sample, and it only ever wipes a database that is empty or already a clean demo. It refuses anything with data and no
+  mark ("it may be real books"), a mark copied from another database, and a demo that somehow holds something a demo
+  never makes. Either way nothing is changed and it exits with an error. It only empties the app's own tables (the ones
+  its migrations create); data in any other table, or another table referring to the app's, makes it refuse.
 - **With `DEMO_MODE=1` the app, migrations and jobs refuse to start** unless the database has the mark **and** holds
   nothing but the sample: no other books, no QuickBooks imports, no users or invitations, no email server, AI, texted
-  receipts, bank connections or online payments, and no stored secret of any kind. They also refuse if the server has
-  settings a real copy has: `SETTINGS_KEY`, the owner sign-in (`APP_LOGIN_PASSWORD_HASH`, `APP_TOTP_SECRET`),
-  `DEV_NO_AUTH`, bank feeds (`LEDGERLINE_URL`), `PAYMENTS_TEST_MODE`, `BOOKS_MODE`, or an `APP_ORG` other than `sample`.
-  Without `SETTINGS_KEY` nothing secret can be saved at all.
+  receipts, bank connections or online payments, no stored secret of any kind, and no data in tables the app doesn't
+  make. The running demo checks this again every minute and stops serving if it ever fails. They also refuse if the
+  server has settings a real copy has: `SETTINGS_KEY`, the owner sign-in (`APP_LOGIN_PASSWORD_HASH`,
+  `APP_TOTP_SECRET`), `DEV_NO_AUTH`, bank feeds (`LEDGERLINE_URL`), `PAYMENTS_TEST_MODE`, `BOOKS_MODE`, or an `APP_ORG`
+  other than `sample`. Without `SETTINGS_KEY` nothing secret can be saved at all.
 - **Normal books refuse a demo database**: without `DEMO_MODE=1`, the app, migrations and jobs won't open a database
   that carries the mark, and `npm run new-books` and `npm run import-qbo` won't write into one. So nobody ends up
   keeping real books in a database that is wiped every night.
 - `DEMO_MODE` must be exactly `1` (or `0`, or unset). Anything else stops the app on purpose.
 
+What these checks can't do: tell real customers or transactions typed into the demo (or restored into it by hand) from
+a visitor's. So give the demo a **new, dedicated database**, never restore real data into it, and remember that
+anything typed into the demo is visible to everyone until the next reset.
+
 **What a visitor can't do** (each shows a clear "turned off in this public demo" page instead), because it could store
-a secret, reach the outside world or change how the server runs:
+a secret, reach the outside world, change how the server runs, or change things for every other visitor:
 
 | Closed | Why |
 |---|---|
 | Settings → Users (people, invitations, sign-in resets), Companies (adding companies) | Everyone is the same "Demo visitor" (the name in the audit log); there is no sign-in to manage. |
 | Changing Settings → Company (name, details, logo) | The company's identity is on every page and PDF. It can be looked at. |
+| Changing Settings → Accounting, Sales, Messages, Form styles and Currencies, and a report's default settings | Every visitor shares them; they'd change how every page and report reads for everyone. They can be looked at. |
+| Undoing a reconciliation, and "change it anyway" on a reconciled transaction | Reconciled history stays as the sample has it. |
 | Settings → Email, and every send | Emails, statements and reminders are recorded on the customer's or vendor's page, never sent. |
 | Settings → AI, AI bill reading and research | No AI provider is ever called. |
 | Settings → Text receipts, and the Twilio webhook | No texts in or out. |
 | Settings → Bank connections, bank refresh | No bank data. |
 | Settings → Payments, pay links, payment webhooks | No online payments. |
-| Import (customers, products, accounts), asking a vendor for their details, invitation and vendor links | Nothing comes in from outside or goes out to someone. |
+| Every import (customers, products, accounts, vendors), asking a vendor for their details, invitation and vendor links | Nothing comes in from outside in bulk or goes out to someone. |
 | File uploads (documents, attachments, logos, bill reading) | A public demo must not become a place to store and hand out files. Refused before the file is read. |
 
 Also: daily jobs (recurring transactions, late fees, reminders, scheduled payments and report emails) don't run;
-sign-in and sign-out pages just go to the app; pages carry `X-Robots-Tag: noindex` and `/robots.txt` disallows
-everything; and each visitor address may make 120 changes per 10 minutes (3,000 across all visitors), on top of the
-usual 64 KB limit per form and 100 lines per transaction. Visitor sessions are kept in memory (the 5,000 most recent).
+sign-in and sign-out pages just go to the app; every response, downloads included, carries `X-Robots-Tag: noindex` and
+`/robots.txt` disallows everything. Limits, all per 10 minutes: each visitor address may make 120 changes (3,000
+across all visitors) and open 150 reports, exports, PDFs, spreadsheets, ZIPs or searches (3,000 across all visitors),
+and at most 4 of those are built at once. A report spans at most about 10 years; print and send batches take 25 at a
+time; the usual 64 KB limit per form still applies. Visitor sessions are kept in memory (the 2,000 most recently used,
+each remembering at most 100 submitted forms) and all start afresh after the nightly reset.
+
+The per-visitor limits use the visitor's address as the host's proxy reports it (`TRUST_PROXY=1`: the last
+`X-Forwarded-For` entry). That's only trustworthy if the app can be reached solely through that proxy and the proxy
+appends the real address; check this on your host before relying on the per-visitor limits. The overall limits hold
+regardless (per running app instance; run one).
 
 ### On Railway
 
@@ -236,7 +253,7 @@ Use a **new** project with a **new, empty** database, never one that holds books
    `railway.demo-reset.json` (start command `node scripts/demo-reset.js`, cron schedule `0 8 * * *`: every day at
    08:00 UTC, about 2–3 a.m. in US Central time; change it in the service's settings if you like), and give it the same
    `DEMO_MODE=1`, `NODE_ENV=production` and `DATABASE_URL`. It needs no domain. Each run wipes and rebuilds in one
-   transaction (a failure leaves the previous day's demo as it was), retries briefly if the app is busy saving, and exits
+   transaction (a failure leaves the previous day's demo as it was; any new schema migrations are applied just before), retries briefly if the app is busy saving, and exits
    non-zero on failure so it shows as failed in Railway.
 
 Other hosts work the same way: one app (`npm run demo-start`), one Postgres database, and a daily scheduled
@@ -252,4 +269,4 @@ Other hosts work the same way: one app (`npm run demo-start`), one Postgres data
 - `BOOKS_MODE=practice` marks a practice copy kept alongside another system. It sends no emails or texts, takes no
   payments and runs no automatic jobs. Leave it unset for normal books.
 - `DEMO_MODE=1` is the public demo: `lib/domain/demo.js` (what's closed), `lib/data/demo.js` (the database interlock and
-  the reset), `scripts/demo-reset.js`, `migrations/053_demo_marker.sql`. Leave it unset for normal books.
+  the reset), `scripts/demo-reset.js`, `migrations/053_demo_marker.sql` and `054`. Leave it unset for normal books.

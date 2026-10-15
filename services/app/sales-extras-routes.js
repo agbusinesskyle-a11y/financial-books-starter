@@ -32,7 +32,8 @@ export async function salesExtrasRoutes(h) {
   }
   if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed');
   const queued = new Set((await salesQueue(pool, { ...scope, which: q[1] })).map(r => Number(r.txn_id)));
-  const ids = form.getAll('ids').map(Number).filter(id => queued.has(id));
+  // Each queued transaction once, and at most a batch's worth (h.batchMax) per request.
+  const ids = [...new Set(form.getAll('ids').map(Number).filter(id => queued.has(id)))].slice(0, h.batchMax ?? 200);
   if (!ids.length) return go(`/sales-queue?which=${q[1]}`, 'error', 'Select at least one.') ?? true;
   if (q[1] === 'print') {
     const pdf = await transactionsPdf(pool, { ...scope, txnIds: ids });
