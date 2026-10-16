@@ -335,3 +335,70 @@ test('round 3: visitors who hang up while the demo re-checks its database don’
   const v = await visitor(fresh).start();
   for (let i = 0; i < 3; i++) assert.equal((await v.get('/reports/r/profit_and_loss?run=1')).status, 200, `report ${i + 1} after the hang-ups`);
 });
+
+// ---- the features ported from the private books: bank review v2/v3, Loans, card credit, Tax Books ----
+
+test('ported: AI research, bank-line files, rules import and tax parties are closed in the demo; the new pages still work', async () => {
+  const v = await visitor(base).start();
+  const { entity_id: company } = await one('SELECT entity_id FROM entity ORDER BY entity_id LIMIT 1');
+  for (const [method, path, why] of [
+    ['POST', '/banking/item/1/research', /AI research is turned off/], ['POST', '/banking/research/1/accept', /AI research is turned off/],
+    ['POST', '/banking/research/1/reject', /AI research is turned off/], ['POST', '/banking/item/1/attach', /File uploads is turned off/],
+    ['POST', '/banking/item/1/attachment/2/delete', /File uploads is turned off/], ['GET', '/banking/rules/import', /Importing is turned off/],
+    ['POST', '/banking/rules/import', /Importing is turned off/], ['POST', `/tax/${company}/parties`, /Tax parties and tax ids is turned off/],
+  ]) {
+    const res = method === 'GET' ? await v.get(path) : await v.post(path, [['kind', 'individual'], ['name', 'Visitor Person'], ['tax_id', '123-45-6789']]);
+    assert.equal(res.status, 403, `${method} ${path}`);
+    assert.match(await res.text(), why, `${method} ${path}`);
+  }
+  assert.equal(await n('SELECT count(*) AS n FROM tax_party'), 0);
+  for (const path of ['/banking', '/banking/rules', '/loans', '/tax', `/tax/${company}/profile`, '/vendors?show=contractors']) assert.equal((await v.get(path)).status, 200, path);
+  assert.equal(demoBlock('POST', `/tax/${company}/profile`), null, 'the tax profile stays editable');
+  assert.equal(demoBlock('POST', '/loans/pay'), null, 'loan payments stay possible');
+});
+
+test('ported: a bank review batch, "all N matching" included, takes at most a batch’s worth', async () => {
+  const v = await visitor(base).start();
+  const res = await v.post('/banking/batch', [['account', 'x'], ['all', `exclude:${DEMO_BATCH_MAX + 1}`]]);
+  assert.equal(res.status, 403);
+  assert.match(await res.text(), new RegExp(`at most ${DEMO_BATCH_MAX} at a time`));
+  const ticked = await v.post('/banking/batch', Array.from({ length: DEMO_BATCH_MAX + 1 }, (_, i) => ['item', String(i + 1)]));
+  assert.equal(ticked.status, 403);
+  assert.notEqual((await v.post('/banking/batch', [['account', 'x'], ['all', 'exclude:3']])).status, 403, 'a few are fine (no such account here)');
+});
+
+test('ported: imported tax baselines are something a demo never has, and the baseline import refuses the demo', async () => {
+  const other = await freshDb();
+  try {
+    await resetDemo(other.pool, { env: { DEMO_MODE: '1' }, asOf: AS_OF });
+    assert.deepEqual(await demoProblems(other.pool), []);
+    const { org_id: orgId, entity_id: entityId } = (await other.pool.query('SELECT org_id, entity_id FROM entity ORDER BY entity_id LIMIT 1')).rows[0];
+    const { saveProfile } = await import('../lib/tax/periods.js');
+    const { importBaseline } = await import('../lib/tax/baselines.js');
+    await saveProfile(other.pool, { orgId, entityId, fields: { returnType: 'form_1065', taxMethodDefault: 'cash', bookBasisDefault: 'accrual', yearEndMonth: 12 }, reason: 'setup', actor: 'tester' });
+    await importBaseline(other.pool, { orgId, entityId, actor: 'tester', payload: {
+      importKey: 'filed-2025-sample', payloadVersion: 1, kind: 'imported_filed', returnType: 'form_1065', formEdition: 2025, bookBasis: 'accrual', consolidationPolicy: 'inclusion_edges',
+      sourcePeriodStart: '2025-01-01', sourcePeriodEnd: '2025-12-31', sourceDocument: { hash: 'sha256:abc', pages: '1-4' }, extractionStatus: 'verified',
+      facts: [{ factKind: 'schedule_l_end', fieldId: 'f1065.L.1', measurement: 'end', effectiveOn: '2025-12-31', amountCents: '125000', state: 'known', provenance: {}, reviewStatus: 'verified' }] } });
+    assert.match((await demoProblems(other.pool)).join('\n'), /imported tax baselines/);
+  } finally { await other.drop(); }
+
+  // The command line: refused with DEMO_MODE=1, and refused on a demo database without it; nothing imported either way.
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = await mkdtemp(join(tmpdir(), 'fb-demo-baseline-'));
+  try {
+    const file = join(dir, 'payload.json');
+    await writeFile(file, '{"facts":[]}');
+    const { entity_id: entityId } = await one('SELECT entity_id FROM entity ORDER BY entity_id LIMIT 1');
+    const envOf = more => ({ PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, DATABASE_URL: db.url, ALLOW_SUPERUSER: '1', ...more });
+    const run = (script, args, more) => promisify(execFile)(process.execPath, [script, ...args], { env: envOf(more) });
+    await assert.rejects(run('scripts/tax-baseline-import.mjs', ['sample', String(entityId), file], { DEMO_MODE: '1' }), e => e.code === 1 && /doesn’t run with DEMO_MODE=1/.test(e.stderr));
+    await assert.rejects(run('scripts/tax-baseline-import.mjs', ['sample', String(entityId), file], {}), e => e.code === 1 && /public demo/.test(e.stderr));
+    await assert.rejects(run('scripts/repair-bank-dims.js', ['--apply'], {}), e => e.code !== 0 && /public demo/.test(e.stderr));
+    assert.equal(await n('SELECT count(*) AS n FROM tax_baseline'), 0);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

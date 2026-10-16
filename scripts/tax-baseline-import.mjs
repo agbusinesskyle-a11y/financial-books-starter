@@ -5,6 +5,7 @@
 import { readFile } from 'node:fs/promises';
 import { createPool } from '../lib/db.js';
 import { importBaseline } from '../lib/tax/baselines.js';
+import { refuseDemoDatabase } from '../lib/data/demo.js';
 
 const [slug, entityArg, file] = process.argv.slice(2);
 if (!slug || !entityArg || !file || !/^\d{1,18}$/.test(entityArg)) {
@@ -14,6 +15,8 @@ if (!slug || !entityArg || !file || !/^\d{1,18}$/.test(entityArg)) {
 const entityId = Number(entityArg);
 const pool = createPool();
 try {
+  // A filed return's figures never go into the public demo (DEMO_MODE=1, or a database demo-reset made).
+  await refuseDemoDatabase(pool);
   const { rows: [org] } = await pool.query('SELECT org_id FROM org WHERE slug = $1', [slug]);
   if (!org) throw new Error(`no org ${slug}`);
   const { rows: [entity] } = await pool.query('SELECT name FROM entity WHERE org_id = $1 AND entity_id = $2', [org.org_id, entityId]);

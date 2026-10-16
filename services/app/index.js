@@ -449,7 +449,9 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
       if (demo) form.delete('edit_reconciled');
       // Print, send and batch actions take at most a batch's worth of selections in the demo.
       if (demo && DEMO_BULK.test(path)) {
-        const most = Math.max(0, ...[...new Set(form.keys())].map(k => form.getAll(k).length));
+        // A bank review "all N matching" (all=<action>:<N>) acts on N items without ticking them: it counts as N.
+        const allN = Number(/^[a-z]+:(\d{1,9})$/.exec(form.get('all') ?? '')?.[1] ?? 0);
+        const most = Math.max(0, allN, ...[...new Set(form.keys())].map(k => form.getAll(k).length));
         if (most > DEMO_BATCH_MAX) throw new HttpError(403, `The demo handles at most ${DEMO_BATCH_MAX} at a time. Choose fewer and try again.`);
       }
       if (path === '/logout') return redirect(res, '/login', { 'Set-Cookie': auth.logout(req) });

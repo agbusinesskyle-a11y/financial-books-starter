@@ -192,7 +192,8 @@ the clean sample is rebuilt, dated as of that day so the demo always looks curre
   `APP_TOTP_SECRET`), `DEV_NO_AUTH`, bank feeds (`LEDGERLINE_URL`), `PAYMENTS_TEST_MODE`, `BOOKS_MODE`, or an `APP_ORG`
   other than `sample`. Without `SETTINGS_KEY` nothing secret can be saved at all.
 - **Normal books refuse a demo database**: without `DEMO_MODE=1`, the app, migrations and jobs won't open a database
-  that carries the mark, and `npm run new-books` and `npm run import-qbo` won't write into one. So nobody ends up
+  that carries the mark, and `npm run new-books`, `npm run import-qbo`, `scripts/tax-baseline-import.mjs` and
+  `scripts/repair-bank-dims.js` won't write into one. So nobody ends up
   keeping real books in a database that is wiped every night.
 - `DEMO_MODE` must be exactly `1` (or `0`, or unset). Anything else stops the app on purpose.
 
@@ -210,19 +211,20 @@ a secret, reach the outside world, change how the server runs, or change things 
 | Changing Settings → Accounting, Sales, Messages, Form styles and Currencies, and a report's default settings | Every visitor shares them; they'd change how every page and report reads for everyone. They can be looked at. |
 | Undoing a reconciliation, and "change it anyway" on a reconciled transaction | Reconciled history stays as the sample has it. |
 | Settings → Email, and every send | Emails, statements and reminders are recorded on the customer's or vendor's page, never sent. |
-| Settings → AI, AI bill reading and research | No AI provider is ever called. |
+| Settings → AI, AI bill reading and research (vendor research on a bank line too) | No AI provider is ever called. |
 | Settings → Text receipts, and the Twilio webhook | No texts in or out. |
 | Settings → Bank connections, bank refresh | No bank data. |
 | Settings → Payments, pay links, payment webhooks | No online payments. |
-| Every import (customers, products, accounts, vendors), asking a vendor for their details, invitation and vendor links | Nothing comes in from outside in bulk or goes out to someone. |
-| File uploads (documents, attachments, logos, bill reading) | A public demo must not become a place to store and hand out files. Refused before the file is read. |
+| Tax Books' shared parties (owners, trusts, their tax IDs) | Tax IDs are secrets, and a demo can store none. The rest of the tax setup works. |
+| Every import (customers, products, accounts, vendors, bank rules), asking a vendor for their details, invitation and vendor links | Nothing comes in from outside in bulk or goes out to someone. |
+| File uploads (documents, attachments, files on a bank line, logos, bill reading) | A public demo must not become a place to store and hand out files. Refused before the file is read. |
 
 Also: daily jobs (recurring transactions, late fees, reminders, scheduled payments and report emails) don't run;
 sign-in and sign-out pages just go to the app; every response, downloads included, carries `X-Robots-Tag: noindex` and
 `/robots.txt` disallows everything. Limits, all per 10 minutes: each visitor address may make 120 changes (3,000
 across all visitors) and open 150 reports, exports, PDFs, spreadsheets, ZIPs or searches (3,000 across all visitors),
-and at most 4 of those are built at once. A report spans at most about 10 years; print and send batches take 25 at a
-time; the usual 64 KB limit per form still applies. Visitor sessions are kept in memory (the 2,000 most recently used,
+and at most 4 of those are built at once. A report spans at most about 10 years; print and send batches, and bank review
+batches ("all N matching" counts as N), take 25 at a time; the usual 64 KB limit per form still applies. Visitor sessions are kept in memory (the 2,000 most recently used,
 each remembering at most 100 submitted forms) and all start afresh after the nightly reset.
 
 The per-visitor limits use the visitor's address as the host's proxy reports it (`TRUST_PROXY=1`: the last
