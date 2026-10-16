@@ -16,7 +16,7 @@ export const COMPANY_UPLOAD_PATH = /^\/settings\/company\/logo$/;
 
 // Settings → Users and Settings → Company, and the company logo. h: the request helpers from index.js.
 export async function userRoutes(h) {
-  const { req, path, form, files, ctx, scope, pool, env, page, base, go, takeFlash, actor, who, send, res, extra, companyMailer, owner } = h;
+  const { req, path, query, form, files, ctx, scope, pool, env, page, base, go, takeFlash, actor, who, send, res, extra, companyMailer, owner } = h;
   const key = () => settingsKey(env);
   const selfId = who.userId;
 
@@ -89,7 +89,8 @@ export async function userRoutes(h) {
     return true;
   }
   if (path === '/settings/users/new' && req.method === 'GET') {
-    shell(userFormBody({ csrf: base().csrf, v: NEW_USER_VALUES, timeZone: ctx.timeZone, selfId, companies: await listCompanies(pool, { orgId: ctx.orgId }) }));
+    shell(userFormBody({ csrf: base().csrf, v: NEW_USER_VALUES, timeZone: ctx.timeZone, selfId, companies: await listCompanies(pool, { orgId: ctx.orgId }),
+      forAccountant: query.for === 'accountant' }));
     return true;
   }
   if (path === '/settings/users' && req.method === 'POST') {

@@ -15,6 +15,8 @@ import { userRoutes, publicInvite, COMPANY_UPLOAD_PATH } from './user-routes.js'
 import { salesSettingsRoutes } from './sales-settings-routes.js';
 import { accountingRoutes } from './accounting-routes.js';
 import { ledgerToolsRoutes } from './ledger-tools-routes.js';
+import { loanRoutes } from './loan-routes.js';
+import { taxRoutes } from './tax-routes.js';
 import { toolsRoutes, IMPORT_UPLOAD_PATH } from './tools-routes.js';
 import { timeRoutes } from './time-routes.js';
 import { publicPay, paymentsSettingsRoutes } from './pay-routes.js';
@@ -74,7 +76,7 @@ import { getNav } from '../../lib/data/nav.js';
 import { navRoutes } from './nav-routes.js';
 import { companyRoutes } from './company-routes.js';
 import { bankFeedRoutes } from './bankfeed-routes.js';
-import { bankingRoutes } from './banking-routes.js';
+import { bankingRoutes, BANK_UPLOAD_PATH } from './banking-routes.js';
 import { chosen, safeBack } from '../../lib/domain/save-choices.js';
 import { preferredChoice, rememberChoice } from '../../lib/data/form-prefs.js';
 import { aiRoutes } from './ai-routes.js';
@@ -431,8 +433,8 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
     if (req.method === 'POST') {
       const boundary = boundaryOf(req.headers['content-type']);
       if (boundary) {
-        if (!UPLOAD_PATH.test(path) && !VENDOR_UPLOAD_PATH.test(path) && !COMPANY_UPLOAD_PATH.test(path) && !IMPORT_UPLOAD_PATH.test(path)) {
-          throw new HttpError(415, 'Uploads are only accepted on a Documents tab, an import or the company logo.');
+        if (!UPLOAD_PATH.test(path) && !VENDOR_UPLOAD_PATH.test(path) && !COMPANY_UPLOAD_PATH.test(path) && !IMPORT_UPLOAD_PATH.test(path) && !BANK_UPLOAD_PATH.test(path)) {
+          throw new HttpError(415, 'Uploads are only accepted on a Documents tab, an import, a bank item or the company logo.');
         }
         try {
           ({ fields: form, files } = parseMultipart(await readBody(req, MAX_DOCUMENT_BYTES + 64 * 1024, 'That file is over the 10 MB limit.'), boundary));
@@ -464,8 +466,8 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
         }
         session.formsUsed.set(once, Date.now());
         while (session.formsUsed.size > (demo ? DEMO_FORMS_PER_SESSION : 500)) session.formsUsed.delete(session.formsUsed.keys().next().value);
-        // Forgotten again when nothing was done: a failure, or no such page.
-        res.on('finish', () => { if (res.statusCode >= 500 || res.statusCode === 404) session.formsUsed.delete(once); });
+        // Nothing was done (a server error, 422: refused, shown again to fix, or no such page): the same form may be sent again.
+        res.on('finish', () => { if (res.statusCode >= 500 || res.statusCode === 422 || res.statusCode === 404) session.formsUsed.delete(once); });
       }
     } else if (req.method !== 'GET') throw new HttpError(405, 'Method not allowed');
 
@@ -978,6 +980,8 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
     if (await vendorRoutes(helpers)) return;
     if (await userRoutes(helpers)) return;
     if (await ledgerToolsRoutes(helpers)) return;
+    if (await loanRoutes(helpers)) return;
+    if (await taxRoutes(helpers)) return;
     if (await toolsRoutes(helpers)) return;
     if (await timeRoutes(helpers)) return;
     if (await mgmtRoutes(helpers)) return;

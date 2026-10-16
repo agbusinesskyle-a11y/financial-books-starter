@@ -110,7 +110,7 @@ export async function vendorTxnRoutes(h) {
     const [vendors, categoriesAll, payFrom, items, terms, jobs] = await Promise.all([
       vendorChoices(pool, scope),
       accountsOfTypes(pool, { ...scope, types: CATEGORY_TYPES }),
-      accountsOfTypes(pool, { ...scope, types: type === 'check' ? ['bank'] : ['bank', 'credit_card'] }),
+      accountsOfTypes(pool, { ...scope, types: type === 'check' ? ['bank'] : type === 'cc_credit' ? ['credit_card'] : ['bank', 'credit_card'] }),
       pool.query('SELECT item_id, name, purchase_cost_cents FROM item WHERE org_id = $1 AND entity_id = $2 AND active AND kind <> $3 ORDER BY lower(name)',
         [orgId, ctx.entityId, 'system']).then(r => r.rows),
       listTerms(pool, scope),
@@ -126,7 +126,7 @@ export async function vendorTxnRoutes(h) {
   };
   const renderDoc = async ({ type, txnId = null, v, error = null, status = 200, duplicate = false, override = false }) => {
     const l = await lists(type);
-    if ((type === 'expense' || type === 'check') && !v.accountId && l.payFrom[0]) v = { ...v, accountId: String(l.payFrom[0].account_id) };
+    if (['expense', 'check', 'cc_credit'].includes(type) && !v.accountId && l.payFrom[0]) v = { ...v, accountId: String(l.payFrom[0].account_id) };
     const nextCheck = type === 'check' && v.accountId ? await nextCheckNumber(pool, { ...scope, accountId: Number(v.accountId) }) : '';
     // A vendor in another currency: bills and vendor credits are typed in it.
     const mc = await multicurrencyOn(pool, scope);
@@ -154,7 +154,8 @@ export async function vendorTxnRoutes(h) {
   // Where a saved vendor form goes (stage F1): close → back where it was opened from (else the transaction); new → a blank form of
   // the same type; save → stays open on it; submit → the bill waits for approval; schedule → the bill's schedule-payment
   // section; print → Print checks; send → the purchase order is emailed, then close.
-  const NOUN = { bill: 'Bill', expense: 'Expense', check: 'Check', vendor_credit: 'Vendor credit', purchase_order: 'Purchase order', item_receipt: 'Item receipt' };
+  const NOUN = { bill: 'Bill', expense: 'Expense', check: 'Check', vendor_credit: 'Vendor credit', purchase_order: 'Purchase order', item_receipt: 'Item receipt',
+    cc_credit: 'Credit card credit' };
   async function afterVendorSave(id, type, choice) {
     const t = await loadVt(id);
     // Close goes back to the page the form was opened from; with none known, to the saved transaction (as before).
@@ -208,7 +209,7 @@ export async function vendorTxnRoutes(h) {
     }
     if (query.copy) {
       const src = await loadVt(idParam(query.copy) ?? 0);
-      if (!DOC_TYPES.includes(src.type)) throw new HttpError(400, 'Only bills, expenses, checks and vendor credits can be copied.');
+      if (!DOC_TYPES.includes(src.type)) throw new HttpError(400, 'Only bills, expenses, checks, vendor credits and credit card credits can be copied.');
       // Copy to vendor credit (stage F2): a bill's lines become a credit from the same vendor.
       const as = query.as === 'vendor_credit' && src.type === 'bill' ? 'vendor_credit' : src.type;
       await renderDoc({ type: as, v: { ...valuesFromVendorTxn(src, { copy: true, today: ctx.today }), ...(as !== src.type ? { termsId: '', dueDate: '' } : {}) } });

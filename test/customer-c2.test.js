@@ -162,8 +162,8 @@ test('New transaction menu, Statements and Recurring tabs follow QBO', async () 
   const page = await (await app.get(`/customers/${cust}`)).text();
   const menu = page.slice(page.indexOf('New transaction</summary>'), page.indexOf('</details>', page.indexOf('New transaction</summary>')));
   const labels = [...menu.matchAll(/<a href="[^"]+"[^>]*>([^<]+)/g)].map(m => m[1]);
-  assert.deepEqual(labels, ['Invoice', 'Multiple invoices', 'Payment', 'Recurring payment', 'Estimate', 'Sales order', 'Payment link', 'Sales receipt',
-    'Credit memo', 'Delayed charge', 'Time activity', 'Statement', 'Contract', 'Request feedback']);
+  assert.deepEqual(labels, ['Invoice', 'Multiple invoices', 'Payment', 'Recurring payment', 'Estimate', 'Sales receipt',
+    'Credit memo', 'Time activity', 'Statement']);
   for (const m of menu.matchAll(/href="(\/soon\/[a-z-]+)"/g)) assert.equal((await app.get(m[1])).status, 200, m[1]);
   const st = await (await app.get(`/customers/${cust}?tab=statements`)).text();
   if (st.includes('<th>Date</th>')) assert.match(st, /<th>Date<\/th><th>No\.<\/th><th>Customer<\/th><th>Start date<\/th><th>End date<\/th><th>Statement type<\/th>/);

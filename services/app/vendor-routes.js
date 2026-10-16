@@ -40,7 +40,7 @@ export async function vendorRoutes(h) {
   let m;
   const key = () => settingsKey(env);
   const filtersFrom = q => ({
-    search: String(q.q ?? '').slice(0, 100), show: ['overdue', 'open', 'paid', 'po'].includes(q.show) ? q.show : '',
+    search: String(q.q ?? '').slice(0, 100), show: ['overdue', 'open', 'paid', 'po', 'contractors'].includes(q.show) ? q.show : '',
     sort: ['name', 'company', 'balance'].includes(q.sort) ? q.sort : 'name', dir: q.dir === 'desc' ? 'desc' : 'asc',
     inactive: q.inactive === '1', page: Math.min(100_000, Math.max(1, Number.parseInt(q.page, 10) || 1)), size: Number(q.size) || 50,
   });

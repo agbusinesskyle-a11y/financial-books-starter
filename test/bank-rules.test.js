@@ -7,7 +7,7 @@ import { buildSampleFeed, writeLedgerlineSample, sampleUuid } from '../lib/bankf
 import { pullCompany } from '../lib/bankfeed/pull.js';
 import { linkCompany, saveMappings } from '../lib/data/bankfeeds.js';
 import { addItem, getBankItem } from '../lib/data/banking.js';
-import { ruleFits, payeeKey, saveRule, getRule, listRules, learnedHistory, suggestFor, acceptSuggestions } from '../lib/bankfeed/rules.js';
+import { ruleFits, payeeKey, saveRule, getRule, listRules, learnedHistory, suggestFor, acceptSuggestions, intentOf } from '../lib/bankfeed/rules.js';
 import { canAccess } from '../lib/domain/roles.js';
 
 // Stage B4: bank rules (suggest or add automatically) and suggestions learned from how earlier items were added.
@@ -39,6 +39,18 @@ before(async () => {
   t = tieout(app);
 });
 after(async () => { await app.close(); await llDb.drop(); });
+
+// Accept the way the list does: each ticked item carries the plan its suggestion showed.
+async function acceptShown(llAccountId, itemIds) {
+  const rules = await listRules(pool(), S), history = await learnedHistory(pool(), S);
+  const intents = new Map();
+  for (const id of itemIds) {
+    const item = await getBankItem(pool(), { ...S, itemId: id });
+    const i = intentOf(await suggestFor(pool(), { ...S, item, rules, history }), item);
+    if (i) intents.set(Number(id), i);
+  }
+  return (await acceptSuggestions(pool(), { ...S, llAccountId, itemIds, intents, actor })).accepted;
+}
 
 const itemsLike = async (pattern, state = 'new') => (await pool().query(`SELECT item_id FROM bank_feed_item WHERE entity_id = $1 AND description LIKE $2 AND review_state = $3
   ORDER BY posted_date, item_id`, [S.entityId, pattern, state])).rows.map(r => Number(r.item_id));
@@ -101,9 +113,9 @@ test('a suggest rule fills in the item and the batch accepts it', async () => {
   assert.match(page, /<span class="tag ok">Rule<\/span> Office Supplies/);
   page = await (await app.get(`/banking/item/${id}`)).text();
   assert.match(page, /Filled in by rule “Amazon”/);
-  assert.match(page, new RegExp(`<option value="${A.office}" selected>Office Supplies</option>`));
+  assert.match(page, /<input name="line_account" list="item-cats" autocomplete="off" value="Office Supplies"/);
   const a = await t.snapshot();
-  assert.ok(await acceptSuggestions(pool(), { ...S, llAccountId: llId('Business Card'), itemIds: [id], actor }) === 1);
+  assert.ok(await acceptShown(llId('Business Card'), [id]) === 1);
   const b = await t.snapshot();
   t.checkTied(b, 'rule accept');
   t.expectChange(a, b, { accounts: { [A.card]: -2399, [A.office]: 2399 }, net: -2399, label: 'rule accept' });
@@ -121,11 +133,11 @@ test('an auto rule adds waiting items and new ones as they arrive — but never 
   await withTransaction(pool(), tx => writeVendorDoc(tx, { ...S, actor, type: 'expense', txnDate: handDate, accountId: A.checking, memo: 'Fee entered by hand',
     categoryLines: [{ accountId: A.bank_fees, amount: '15.00' }], itemLines: [] }));
   // Fees the books already have (the sample books record some bank fees) are left to be matched, not added again.
-  const { confidentMatch, matchCandidates } = await import('../lib/data/banking.js');
+  const { possibleDuplicates } = await import('../lib/data/banking.js');
   const unmatched = [];
   for (const id of fees) {
     const item = await getBankItem(pool(), { ...S, itemId: id });
-    if (!confidentMatch(await matchCandidates(pool(), { ...S, item }), item)) unmatched.push(id);
+    if (!(await possibleDuplicates(pool(), { ...S, item })).length) unmatched.push(id);
   }
   assert.ok(!unmatched.includes(fees[0]) && unmatched.length > 3);
   const a = await t.snapshot();
@@ -143,7 +155,7 @@ test('an auto rule adds waiting items and new ones as they arrive — but never 
   const { rows } = await pool().query(`SELECT count(*)::int AS n FROM bank_feed_item i JOIN bank_rule r ON r.rule_id = i.rule_id WHERE r.name = 'Bank fees'`);
   assert.equal(rows[0].n, added);
   const page = await (await app.get(`/banking?account=${llId('Operating Checking')}&tab=categorized`)).text();
-  assert.match(page, /Added by rule Bank fees/);
+  assert.match(page, /automatically from rule “Bank fees”/);
   // A new fee arrives from the bank: the pull adds it.
   await ll.query(`INSERT INTO core.transaction (org_id, transaction_id, account_id, amount, currency, posted_date, pending, description_raw, status, revision)
     VALUES ($1, $2, $3, -15.00, 'USD', '2026-10-12', false, 'MONTHLY SERVICE FEE', 'active', 1)`, [feed.org, sampleUuid('newfee'), llId('Operating Checking')]);
@@ -163,14 +175,14 @@ test('learning: after three Shell fill-ups go to Fuel, the fourth is suggested w
   assert.deepEqual([s.source, s.confidence, s.accountId, s.count, s.of], ['history', 'low', A.fuel, 1, 1]);
   await addItem(pool(), { ...S, itemId: shells[1], payee: `v:${vendorId}`, lines: [{ accountId: A.fuel, amount: '' }], actor });
   // Not sure enough yet: the batch leaves it.
-  assert.equal(await acceptSuggestions(pool(), { ...S, llAccountId: llId('Business Card'), itemIds: [shells[2]], actor }), 0);
+  assert.equal(await acceptShown(llId('Business Card'), [shells[2]]), 0);
   await addItem(pool(), { ...S, itemId: shells[2], payee: `v:${vendorId}`, lines: [{ accountId: A.fuel, amount: '' }], actor });
   s = await suggest(shells[3]);
   assert.deepEqual([s.source, s.confidence, s.payee, s.count, s.of], ['history', 'high', `v:${vendorId}`, 3, 3]);
   const page = await (await app.get(`/banking/item/${shells[3]}`)).text();
   assert.match(page, /Filled in like 3 of 3 earlier items/);
   const a = await t.snapshot();
-  assert.equal(await acceptSuggestions(pool(), { ...S, llAccountId: llId('Business Card'), itemIds: [shells[3]], actor }), 1);
+  assert.equal(await acceptShown(llId('Business Card'), [shells[3]]), 1);
   const b = await t.snapshot();
   t.checkTied(b, 'history accept');
   t.expectChange(a, b, { accounts: { [A.card]: -5400, [A.fuel]: 5400 }, net: -5400, label: 'history accept' });
@@ -195,4 +207,14 @@ test('rules belong to people who keep the books', async () => {
   const fromItem = await (await app.get(`/banking/rules/new?from=${(await itemsLike('TRACTOR SUPPLY%'))[0]}`)).text();
   assert.match(fromItem, /value="Tractor Supply"/);
   assert.match(fromItem, /name="cond_value" value="TRACTOR"/);
+});
+
+test('reports-only people don’t see Rules in the menu, and can’t open it (menu cleanup)', async () => {
+  const { appNav } = await import('../lib/views/nav.js');
+  const nav = role => { const n = appNav({ role, can: p => canAccess(role, 'GET', p), path: '/home', csrf: 'x', bookmarks: [], pins: ['accounting'] }); return [n.rail, n.panel].map(String).join(''); };
+  assert.equal(canAccess('reports', 'GET', '/banking/rules'), false);
+  assert.equal(canAccess('reports', 'GET', '/banking/rules/7'), false);
+  assert.equal(canAccess('reports', 'GET', '/banking'), true);
+  assert.doesNotMatch(nav('reports'), /href="\/banking\/rules"/);
+  assert.match(nav('standard'), /href="\/banking\/rules"/);
 });

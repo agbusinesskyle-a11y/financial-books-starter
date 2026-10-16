@@ -192,3 +192,31 @@ test('1099 summary: bank payments to tracked vendors, card payments left out, th
   assert.match(csv, new RegExp(`Mill Road Properties,Mill Road Properties LLC,"220 Commerce St, Gainesville, TX 76240",,${(rows[0].n / 100).toFixed(2)},Yes`));
   assert.doesNotMatch(csv, /Lone Star Feed Mill/, 'untracked vendors aren’t on the 1099 list');
 });
+
+// A vendor's name as an exact piece of a page (for matching).
+const escRe = x => x.replace(/[.*+?^${}()|[\]\\]/g, c => `\\${c}`);
+test('Contractors lists the 1099 vendors; vendors paid over the threshold can be ticked and tracked from the 1099 page', async () => {
+  const page = await (await app.get('/vendors/1099?year=2026')).text();
+  const untracked = [...page.matchAll(/<input type="checkbox" name="vendor" value="(\d+)">/g)].map(m => Number(m[1]));
+  assert.ok(untracked.length, 'some vendors were paid over the threshold without being tracked');
+  const pick = untracked[0];
+  const { rows: [before] } = await app.db.pool.query('SELECT track_1099, display_name FROM vendor WHERE vendor_id = $1', [pick]);
+  assert.equal(before.track_1099, false);
+  const name = new RegExp(`>${escRe(before.display_name)}<`);
+  assert.doesNotMatch(await (await app.get('/vendors?show=contractors')).text(), name);
+  const res = await app.post('/vendors/1099/track', new URLSearchParams([['vendor', String(pick)], ['year', '2026']]));
+  assert.equal(res.status, 303);
+  assert.equal((await app.db.pool.query('SELECT track_1099 FROM vendor WHERE vendor_id = $1', [pick])).rows[0].track_1099, true);
+  assert.match(await (await app.get('/vendors?show=contractors')).text(), name);
+  assert.equal((await app.post('/vendors/1099/track', new URLSearchParams([['year', '2026']]))).status, 303, 'nothing ticked: a message, nothing changed');
+  const home = await (await app.get('/home')).text();
+  assert.match(home, /href="\/vendors\?show=contractors"[^>]*>Contractors</);
+});
+
+test('the Contractors list says what it shows; only people who can track see the tick boxes (Codex builds #1, #3)', async () => {
+  assert.match(await (await app.get('/vendors?show=contractors')).text(), /Showing vendors tracked for 1099s\./);
+  const { ten99Page } = await import('../lib/views/vendor-auto.js');
+  const data = { year: 2026, tracked: [], untrackedOver: [{ vendor_id: 1, display_name: 'Any Vendor', paid_cents: 100000 }], totals: { vendors: 0, paidCents: 0, missingTaxIds: 0 } };
+  assert.doesNotMatch(String(ten99Page({ entityName: 'x', csrf: 'c', data, years: [2026], canTrack: false })), /name="vendor"/);
+  assert.match(String(ten99Page({ entityName: 'x', csrf: 'c', data, years: [2026], canTrack: true })), /name="vendor" value="1"/);
+});

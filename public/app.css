@@ -659,6 +659,7 @@ small.warn, span.warn { color: var(--warn); }
 .bank-items tr.pending td { color: var(--muted); font-style: italic; }
 .bank-items small { display: block; }
 .bank-items .pick { width: 2rem; }
+@media (max-width: 700px) { .bank-items .pick { width: auto; } }
 .bank-item-facts .facts { display: grid; grid-template-columns: max-content 1fr; gap: .3rem 1rem; margin: 0 0 .75rem; }
 .bank-item-facts .facts dt { color: var(--muted); }
 .bank-item-facts .facts dd { margin: 0; }
@@ -725,3 +726,37 @@ tr.text-line input[data-desc] { font-style: italic; }
 
 /* Practice copy (lib/domain/practice.js): always visible, above everything. */
 .practice-banner { position: sticky; top: 0; z-index: 50; padding: .45rem 1rem; background: #fff4e0; color: var(--warn); border-bottom: 1px solid #f0d9a8; font-size: .9rem; font-weight: 600; text-align: center; }
+
+/* Bank transactions: review a row in place (stage BR-2) */
+.bank-items.in-row input[list] { width: 100%; min-width: 9rem; }
+.bank-items.in-row .row-memo { width: 100%; min-width: 9rem; margin-top: .35rem; font-size: .85rem; }
+.bank-items.in-row td small { display: block; }
+.bank-items.in-row tr.row-error { box-shadow: inset 3px 0 0 var(--warn); }
+.bank-items.in-row .row-msg:empty { display: none; }
+/* Bank item: find match, settle, splits (stage BR-3) */
+.find-form .form-grid { grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); }
+.settle-docs li { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.settle-docs .pay-amount { width: 7rem; }
+.settle-total { font-weight: 600; min-height: 1.2em; }
+.split-controls { margin: .25rem 0 .75rem; }
+details.adjust { margin: .75rem 0; }
+.split-line:has([data-remove-line]) { grid-template-columns: 2fr 1fr 2fr auto; }
+.split-line [data-remove-line] { align-self: end; padding-bottom: .55rem; }
+@media (max-width: 700px) {
+  .split-line:has([data-remove-line]) { grid-template-columns: 1fr 1fr; }
+  .split-line [data-remove-line] { grid-column: 1 / -1; justify-self: end; padding: 0; }
+}
+/* Bank item: files, notes, bill (stage BR-7) */
+.bank-extras { margin-top: .75rem; }
+.bank-extras .small-heading { font-size: .95rem; margin: .75rem 0 .25rem; }
+.inline-form { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+.inline-form input[name=note] { flex: 1 1 16rem; }
+summary .inline-heading { display: inline; font-size: 1.15rem; }
+.bank-items small.note { font-style: italic; }
+/* Rules v2 (stage BR-5) */
+.rule-split-line { grid-template-columns: 2fr 1fr 1fr 2fr; }
+.rule-preview td small { display: block; }
+.rule-accounts { border: 0; padding: 0; margin: .5rem 0; display: flex; flex-wrap: wrap; gap: .25rem 1rem; }
+.rule-accounts legend { font-weight: 600; }
+.rule-accounts p { flex-basis: 100%; margin: 0; }
+@media (max-width: 700px) { .rule-split-line { grid-template-columns: 1fr 1fr; } }

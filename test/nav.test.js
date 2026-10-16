@@ -46,7 +46,7 @@ test('every signed-in page carries the navigation instead of the old top bar', a
 test('the full QBO menu is there, with unbuilt pages marked Soon and every Soon page explained', async () => {
   const body = await (await app.get('/customers')).text();
   for (const g of GROUPS) assert.ok(body.includes(`<span>${g.label.replace('&', '&amp;')}</span>`), g.label);
-  assert.match(body, /href="\/soon\/payroll" class="soon">Payroll<span class="soon-tag">Soon<\/span>/);
+  assert.match(body, /href="\/soon\/fixed-assets" class="soon">Fixed assets<span class="soon-tag">Soon<\/span>/);
   for (const i of allItems.filter(x => !x.href)) {
     assert.ok(Object.hasOwn(SOON, i.slug), `Soon text for ${i.slug}`);
     const res = await app.get(`/soon/${i.slug}`);
@@ -146,7 +146,7 @@ test('search finds customers, vendors, transactions (by number, memo, amount), r
   const amount = (Number(t.total_cents) / 100).toFixed(2);
   assert.ok(sec(await globalSearch(pool, { ...scope, q: `$${amount}`, can, limit: 50 }), 'Transactions').some(x => x.label.endsWith(t.doc_number)), 'by amount');
   assert.ok(sec(await globalSearch(pool, { ...scope, q: 'balance sheet', can }), 'Reports').some(x => x.href === '/reports/r/balance_sheet'));
-  assert.ok(sec(await globalSearch(pool, { ...scope, q: 'payroll', can }), 'Pages').some(x => x.href === '/soon/payroll'));
+  assert.ok(sec(await globalSearch(pool, { ...scope, q: 'fixed assets', can }), 'Pages').some(x => x.href === '/soon/fixed-assets'));
   assert.deepEqual((await globalSearch(pool, { ...scope, q: '%', can })).sections.filter(([s]) => s === 'Customers'), [], '% is literal');
   // Only what the person can open.
   const custOnly = p => canAccess('customers', 'GET', p);
@@ -176,7 +176,7 @@ test('menus only show what a role can open', () => {
   assert.match(admin, /href="\/settings\/users"/);
   // Everyone can reach their own navigation pages; customers-only can't open Home.
   for (const role of ['admin', 'standard', 'customers', 'vendors', 'reports']) {
-    for (const p of ['/apps', '/create', '/search', '/bookmarks', '/bookmarks/add', '/navigation', '/soon/payroll']) assert.ok(canAccess(role, 'GET', p), `${role} ${p}`);
+    for (const p of ['/apps', '/create', '/search', '/bookmarks', '/bookmarks/add', '/navigation', '/soon/fixed-assets']) assert.ok(canAccess(role, 'GET', p), `${role} ${p}`);
   }
   assert.ok(!canAccess('customers', 'GET', '/home'));
   assert.ok(canAccess('reports', 'POST', '/bookmarks/add'), 'reports-only people keep bookmarks');

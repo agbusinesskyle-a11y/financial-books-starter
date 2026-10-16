@@ -13,7 +13,8 @@ const PATHS = /^\/(home|apps|create|search|navigation|bookmarks(\/(add|remove|up
 export async function navRoutes(h) {
   const { req, res, path, query, form, scope, pool, page, base, go, takeFlash, who, ctx, navData, send, extra } = h;
   if (!PATHS.test(path)) return false;
-  const can = p => canAccess(who.role, 'GET', p);
+  // The same as the sidebar's: people limited to some companies don't manage users or companies.
+  const can = p => canAccess(who.role, 'GET', p) && (ctx.orgAdmin || !/^\/settings\/(users|companies)(\/|$)/.test(p));
   const nav = () => appNav({ ...navData, role: who.role, can, path, search: '', title: '', csrf: base().csrf, entityName: ctx.entityName });
 
   if (req.method === 'GET') {
@@ -28,6 +29,8 @@ export async function navRoutes(h) {
     if (path === '/navigation') { page(navigationPage({ ...base(), flash: takeFlash(), pins: navData.pins })); return true; }
     if (path.startsWith('/soon/')) {
       const slug = path.slice(6);
+      // Lending's placeholders became the Loans page; a bookmark saved on one still gets there.
+      if (['lending', 'loans', 'line-of-credit'].includes(slug)) return go('/loans') ?? true;
       if (!Object.hasOwn(SOON, slug)) throw new HttpError(404, 'Not found');
       page(soonPage({ ...base(), slug }));
       return true;

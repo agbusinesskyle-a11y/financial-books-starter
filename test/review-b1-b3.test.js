@@ -1,4 +1,6 @@
 import { test, before, after } from 'node:test';
+import { itemForm, listFields, picks } from './bank-forms.js';
+
 import assert from 'node:assert/strict';
 import pg from 'pg';
 import { makeTotp } from '../lib/auth.js';
@@ -170,12 +172,13 @@ test('#9 deleting one of several matched transactions flags the bank item', asyn
   // (#16) the two show as candidates to tick together.
   const cands = await matchCandidates(pool(), { ...S, item: await getBankItem(pool(), { ...S, itemId: id }), others: true });
   assert.ok([t1, t2].every(t => cands.others.some(c => c.txn_id === t)));
-  const res = await app.post(`/banking/item/${id}/match`, new URLSearchParams([['txn', String(t1)], ['txn', String(t2)]]));
+  const f = await itemForm(app, id);
+  const res = await app.post(`/banking/item/${id}/match`, new URLSearchParams([['rev', f.rev], ['txn', String(t1)], ['ver_' + t1, f.ver(t1)], ['txn', String(t2)], ['ver_' + t2, f.ver(t2)]]));
   assert.equal(res.status, 303);
   assert.equal((await item(id)).review_state, 'matched');
   const { deleteVendorTxn } = await import('../lib/data/payables.js');
   await deleteVendorTxn(pool(), { ...S, txnId: t2, actor });
-  assert.deepEqual([(await item(id)).review_state, (await item(id)).attention], ['matched', 'changed']);
+  assert.deepEqual([(await item(id)).review_state, (await item(id)).attention], ['matched', 'books']);
   assert.equal(await undoItem(pool(), { ...S, itemId: id, actor }), 'unmatched');
 });
 
@@ -185,12 +188,16 @@ test('#10 editing or voiding a linked transaction flags its bank items; fixing i
   const out = await itemBy('TRANSFER OUT RV'), into = await itemBy('TRANSFER IN RV');
   const { txnId } = await transferItem(pool(), { ...S, itemId: out, otherAccountId: A.savings, actor });
   await saveTransfer(pool(), { ...S, type: 'transfer', txnId, fromId: A.checking, toId: A.savings, amountText: '700.00', txnDate: '2026-10-09', memo: '' });
-  assert.equal((await item(out)).attention, 'changed');
-  assert.equal((await item(into)).attention, 'changed');
+  assert.equal((await item(out)).attention, 'books');
+  assert.equal((await item(into)).attention, 'books');
   await saveTransfer(pool(), { ...S, type: 'transfer', txnId, fromId: A.checking, toId: A.savings, amountText: '500.00', txnDate: '2026-10-09', memo: '' });
+  // The amount is right again, but the transfer was still edited (its memo): flagged until a person checks it.
+  assert.equal((await item(out)).attention, 'books');
+  const { markChecked } = await import('../lib/data/banking.js');
+  await markChecked(pool(), { ...S, itemId: out, actor });
   assert.equal((await item(out)).attention, null);
   await voidLedgerTxn(pool(), { ...S, txnId });
-  assert.equal((await item(out)).attention, 'changed');
+  assert.equal((await item(out)).attention, 'books');
   // #14 a flagged item isn't pre-ticked in Reconcile.
   const st = await reconcileState(pool(), { ...S, accountId: A.checking, through: '2026-10-12' });
   assert.ok(!st.items.some(i => i.txn_id === txnId && i.bank_cleared));
@@ -201,8 +208,9 @@ test('#13 undoing a paired transfer from the side that made it keeps it for the 
     { key: 'p-i', account: 'Business Savings', amount: '250.00', date: '2026-10-08', description: 'PAIR IN' }]);
   const out = await itemBy('PAIR OUT'), into = await itemBy('PAIR IN');
   const { txnId } = await transferItem(pool(), { ...S, itemId: out, otherAccountId: A.savings, actor });
-  assert.equal(await undoItem(pool(), { ...S, itemId: out, actor }), 'unmatched');
+  assert.equal(await undoItem(pool(), { ...S, itemId: out, actor }), 'handed');
   assert.ok((await pool().query('SELECT 1 FROM txn WHERE txn_id = $1', [txnId])).rowCount, 'the transfer still records the other side');
+  assert.equal((await item(into)).review_state, 'added', 'the other side now owns it');
   assert.equal((await pool().query('SELECT how FROM bank_feed_link WHERE txn_id = $1', [txnId])).rows[0].how, 'added');
   assert.equal(await undoItem(pool(), { ...S, itemId: into, actor }), 'deleted');
   assert.equal((await pool().query('SELECT 1 FROM txn WHERE txn_id = $1', [txnId])).rowCount, 0);
@@ -224,8 +232,8 @@ test('#15 a later start date keeps watching items the books already used', async
 test('#18 the Add form as a browser posts it: one category, blank amount, two empty rows', async () => {
   await bankSays([{ key: 'form', account: 'Operating Checking', amount: '-27.50', date: '2026-10-11', description: 'FORM TEST' }]);
   const id = await itemBy('FORM TEST');
-  const res = await app.post(`/banking/item/${id}/add`, new URLSearchParams([['payee', ''],
-    ['line_account', String(A.office)], ['line_amount', ''], ['line_description', ''],
+  const res = await app.post(`/banking/item/${id}/add`, new URLSearchParams([...await picks(app, id), ['rev', (await itemForm(app, id)).rev], ['payee', ''],
+    ['line_account', 'Office Supplies'], ['line_amount', ''], ['line_description', ''],
     ['line_account', ''], ['line_amount', ''], ['line_description', ''],
     ['line_account', ''], ['line_amount', ''], ['line_description', ''], ['memo', '']]));
   assert.equal(res.status, 303, await res.clone().text());

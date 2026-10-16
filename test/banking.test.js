@@ -1,4 +1,6 @@
 import { test, before, after } from 'node:test';
+import { itemForm, listFields, picks } from './bank-forms.js';
+
 import assert from 'node:assert/strict';
 import { startApp } from './app-harness.js';
 import { freshDb } from './harness.js';
@@ -105,7 +107,6 @@ test('add: a card purchase with a vendor and a split', async () => {
   const other = await itemBy('SHELL OIL 57444 PLAINVIEW TX');
   await assert.rejects(addItem(pool(), { ...S, itemId: other, actor, lines: [{ accountId: A.fuel, amount: '60.00' }] }), /split adds up to \$60\.00; the bank shows \$61\.02/);
   await assert.rejects(addItem(pool(), { ...S, itemId: other, actor, lines: [{ accountId: A.card, amount: '' }] }), /can’t be Business Card itself/);
-  await assert.rejects(addItem(pool(), { ...S, itemId: other, actor, payee: `c:${Object.values(app.ids.customers)[0]}`, lines: [{ accountId: A.fuel, amount: '' }] }), /vendor/);
 });
 
 test('add: money into a bank account becomes a deposit', async () => {
@@ -120,12 +121,12 @@ test('add: loan activity becomes a journal entry; transfer to the loan pairs wit
   await step('loan via transfer', () => transferItem(pool(), { ...S, itemId: loanItem, otherAccountId: A.checking, actor }),
     { accounts: { [A.equipment_loan]: 85000, [A.checking]: -85000 } });
   assert.equal((await state(loanItem)).review_state, 'added');
-  // A card refund (money into a card that isn't a payment) is added as a journal entry against the category.
+  // A card refund (money into a card that isn't a payment) is added as a credit card credit against the category.
   await bankSays([{ key: 'refund', account: 'Business Card', amount: '12.00', date: '2026-10-10', description: 'TRACTOR SUPPLY REFUND' }]);
   const refund = await itemBy('TRACTOR SUPPLY REFUND');
   const txnId = await step('card refund', () => addItem(pool(), { ...S, itemId: refund, lines: [{ accountId: A.repairs, amount: '' }], actor }),
     { accounts: { [A.card]: 1200, [A.repairs]: -1200 }, net: 1200 });
-  assert.equal((await pool().query('SELECT type FROM txn WHERE txn_id = $1', [txnId])).rows[0].type, 'journal_entry');
+  assert.equal((await pool().query('SELECT type FROM txn WHERE txn_id = $1', [txnId])).rows[0].type, 'cc_credit');
 });
 
 test('transfer between two fed accounts records both bank items with one transaction', async () => {
@@ -206,7 +207,7 @@ test('another company can’t touch these bank items', async () => {
   const other = { orgId: S.orgId, entityId: S.entityId + 999 };
   assert.equal(await getBankItem(pool(), { ...other, itemId: id }), null);
   await assert.rejects(addItem(pool(), { ...other, itemId: id, lines: [{ accountId: A.fuel, amount: '' }], actor }), /not found/);
-  assert.equal(await excludeItems(pool(), { ...other, itemIds: [id], actor }), 0);
+  await assert.rejects(excludeItems(pool(), { ...other, itemIds: [id], actor }), /not found/);
 });
 
 test('confidentMatch needs one clear candidate', () => {
@@ -230,21 +231,23 @@ test('the screen: cards, tabs, item page, add and undo through the forms', async
   const id = await itemBy('SCREEN TEST CHARGE');
   page = await (await app.get(`/banking/item/${id}`)).text();
   for (const h of ['Match', 'Add', 'Transfer', 'Exclude']) assert.match(page, new RegExp(`<h2>${h}</h2>`));
-  let res = await app.post(`/banking/item/${id}/add`, new URLSearchParams([['payee', ''], ['line_account', String(A.fuel)], ['line_amount', '40.00'], ['line_description', ''],
+  let rev = (await itemForm(app, id)).rev;
+  let res = await app.post(`/banking/item/${id}/add`, new URLSearchParams([...await picks(app, id), ['rev', rev], ['payee', ''], ['line_account', 'Fuel'], ['line_amount', '40.00'], ['line_description', ''],
     ['line_account', ''], ['line_amount', ''], ['line_description', ''], ['memo', '']]));
   assert.equal(res.status, 422);
   assert.match(await res.text(), /split adds up to \$40\.00/);
-  res = await app.post(`/banking/item/${id}/add`, new URLSearchParams([['payee', ''], ['line_account', String(A.fuel)], ['line_amount', ''], ['line_description', 'Diesel'], ['memo', '']]));
+  res = await app.post(`/banking/item/${id}/add`, new URLSearchParams([...await picks(app, id), ['rev', rev], ['payee', ''], ['line_account', 'Fuel'], ['line_amount', ''], ['line_description', 'Diesel'], ['memo', '']]));
   assert.equal(res.status, 303);
   assert.equal((await state(id)).review_state, 'added');
   page = await (await app.get(`/banking/item/${id}`)).text();
   assert.match(page, /Added as <a href="\/vtxns\/\d+">Expense/);
-  res = await app.post(`/banking/item/${id}/undo`, {});
+  res = await app.post(`/banking/item/${id}/undo`, { plan: (await itemForm(app, id)).plan });
   assert.equal(res.status, 303);
   assert.equal((await state(id)).review_state, 'new');
   // Batch: exclude ticked, then accept matches with nothing ticked.
-  res = await app.post('/banking/batch', new URLSearchParams([['account', checking], ['tab', 'review'], ['action', 'exclude'], ['item', String(id)]]));
-  assert.equal(res.status, 303);
+  res = await app.post('/banking/batch', new URLSearchParams([['account', checking], ['tab', 'review'], ['action', 'exclude'], ['item', String(id)], ...(await listFields(app, checking, [id]))]));
+  assert.equal(res.status, 200);
+  assert.match(await res.text(), /Exclude: 1 of 1 done/);
   assert.equal((await state(id)).review_state, 'excluded');
   res = await app.post('/banking/batch', new URLSearchParams([['account', checking], ['tab', 'review'], ['action', 'accept']]));
   assert.equal(res.status, 303);

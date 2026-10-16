@@ -18,7 +18,7 @@ export async function bankFeedRoutes(h) {
     const asked = String(form.get('back') ?? '');
     const back = /^\/banking(\?[\w=&%.-]*)?$/.test(asked) ? asked : canAccess(who.role, 'GET', '/settings/bank-feeds') ? '/settings/bank-feeds' : '/banking';
     try {
-      const [kind, text] = summary(await pullCompany(pool, ll, { ...scope, trigger: 'refresh', key: settingsKey(h.env), smsFetch: h.smsFetch, env: h.env }));
+      const [kind, text] = summary(await pullCompany(pool, ll, { ...scope, trigger: 'refresh', key: settingsKey(h.env), smsFetch: h.smsFetch, env: h.env, research: 'background', aiFetch: h.aiFetch }));
       return go(back, kind, text) ?? true;
     } catch (error) {
       if (!(error instanceof ValidationError)) throw error;
@@ -55,7 +55,7 @@ export async function bankFeedRoutes(h) {
   if (path === '/settings/bank-feeds/link') {
     return attempt(async () => {
       const choice = await linkCompany(pool, ll, { ...scope, llEntityId: form.get('ll_entity_id'), actor });
-      const r = await pullCompany(pool, ll, { ...scope, trigger: 'link', key: settingsKey(h.env), smsFetch: h.smsFetch, env: h.env });
+      const r = await pullCompany(pool, ll, { ...scope, trigger: 'link', key: settingsKey(h.env), smsFetch: h.smsFetch, env: h.env, research: 'background', aiFetch: h.aiFetch });
       return go('/settings/bank-feeds', r.status === 'ok' ? 'ok' : 'error', r.status === 'ok'
         ? `Linked to ${choice.name}. Match each account below to an account in these books.` : `Linked to ${choice.name}, but ${r.error}`) ?? true;
     });
@@ -70,7 +70,7 @@ export async function bankFeedRoutes(h) {
     return attempt(async () => {
       const choices = form.getAll('account').map(id => ({ id, choice: form.get(`books_${id}`) ?? '', start: form.get(`start_${id}`) ?? '' }));
       await saveMappings(pool, { ...scope, choices, actor });
-      const [kind, text] = summary(await pullCompany(pool, ll, { ...scope, trigger: 'refresh', key: settingsKey(h.env), smsFetch: h.smsFetch, env: h.env }));
+      const [kind, text] = summary(await pullCompany(pool, ll, { ...scope, trigger: 'refresh', key: settingsKey(h.env), smsFetch: h.smsFetch, env: h.env, research: 'background', aiFetch: h.aiFetch }));
       return go('/settings/bank-feeds', kind, `Accounts saved. ${text}`) ?? true;
     });
   }

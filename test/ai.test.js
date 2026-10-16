@@ -1,4 +1,6 @@
 import { test, before, after } from 'node:test';
+import { itemForm, listFields, picks } from './bank-forms.js';
+
 import assert from 'node:assert/strict';
 import { startApp } from './app-harness.js';
 import { freshDb } from './harness.js';
@@ -148,25 +150,26 @@ test('research → accept (new vendor) → Add: nothing posts until a person add
   assert.match(page, /<strong>Tractor Supply Co\.<\/strong> — Farm and ranch supply store/);
   assert.match(page, /href="https:\/\/www\.tractorsupply\.com\/store\/1234" target="_blank" rel="noopener noreferrer nofollow"/);
   assert.match(page, /New vendor: Tractor Supply Co\. · Lubbock, TX · tractorsupply\.com/);
-  // The other item with the same payee gets it as a suggestion — never accepted in bulk.
+  // The other item with the same payee gets it as a suggestion — never accepted in bulk. It is $84.17 against the researched
+  // $12.50 (more than twice): the vendor carries over, the category doesn't (stage S5).
   const item2 = await getBankItem(pool(), { ...S, itemId: other });
   const s = await suggestFor(pool(), { ...S, item: item2, rules: await listRules(pool(), S), history: await learnedHistory(pool(), S) });
-  assert.deepEqual([s.source, s.accountId], ['ai', A.repairs]);
-  assert.equal(await acceptSuggestions(pool(), { ...S, llAccountId: llId('Business Card'), itemIds: [other], actor }), 0);
+  assert.deepEqual([s.source, s.accountId, s.confidence], ['ai', null, 'low']);
+  assert.equal((await acceptSuggestions(pool(), { ...S, llAccountId: llId('Business Card'), itemIds: [other], actor })).accepted, 0);
   const { rows: [r] } = await pool().query('SELECT research_id FROM vendor_research WHERE item_id = $1', [id]);
   res = await app.post(`/banking/research/${r.research_id}/accept`, {});
   assert.equal(res.status, 303);
   const loc = res.headers.get('location');
   const { rows: [v] } = await pool().query(`SELECT vendor_id, website FROM vendor WHERE entity_id = $1 AND display_name = 'Tractor Supply Co.'`, [S.entityId]);
   assert.ok(v, 'vendor created');
-  assert.equal(loc, `/banking/item/${id}?payee=v:${v.vendor_id}&category=${A.repairs}`);
+  assert.equal(loc, `/banking/item/${id}?research=${r.research_id}`, 'the form is filled from the research, checked again for the line as it is');
   const b = await t.snapshot();
   t.checkTied(b, 'after accept');
   t.expectChange(a, b, { label: 'accepting posts nothing' });
   page = await (await app.get(loc)).text();
-  assert.match(page, new RegExp(`<option value="v:${v.vendor_id}" selected>Tractor Supply Co\\.</option>`));
-  assert.match(page, new RegExp(`<option value="${A.repairs}" selected>Repairs &amp; Maintenance</option>`));
-  res = await app.post(`/banking/item/${id}/add`, new URLSearchParams([['payee', `v:${v.vendor_id}`], ['line_account', String(A.repairs)], ['line_amount', ''], ['line_description', ''], ['memo', '']]));
+  assert.match(page, /<input name="payee" list="item-payees" autocomplete="off" value="Tractor Supply Co\."/);
+  assert.match(page, /<input name="line_account" list="item-cats" autocomplete="off" value="Repairs &amp; Maintenance"/);
+  res = await app.post(`/banking/item/${id}/add`, new URLSearchParams([...await picks(app, id), ['rev', (await itemForm(app, id)).rev], ['payee', 'Tractor Supply Co.'], ['line_account', 'Repairs & Maintenance'], ['line_amount', ''], ['line_description', ''], ['memo', '']]));
   assert.equal(res.status, 303);
   const c = await t.snapshot();
   t.checkTied(c, 'after add');

@@ -2,7 +2,8 @@ import { randomBytes } from 'node:crypto';
 import { HttpError, idParam, tooMany, clientIp } from './http.js';
 import { ValidationError, listTerms } from '../../lib/data/writes.js';
 import { accountsOfTypes } from '../../lib/data/ledger.js';
-import { getVendor } from '../../lib/data/vendors.js';
+import { getVendor, track1099 } from '../../lib/data/vendors.js';
+import { canAccess } from '../../lib/domain/roles.js';
 import { listTemplates, getTemplate, saveTemplate, setTemplateActive, deleteTemplate, vendorTemplateRows } from '../../lib/data/recurring.js';
 import { scheduleBillPayment, cancelScheduledPayment } from '../../lib/data/payables.js';
 import { createInfoRequest, findOpenRequest, submitInfoRequest, reviewRequest, resolveRequest } from '../../lib/data/vendor-info.js';
@@ -36,11 +37,22 @@ const templateToValues = t => ({ name: t.name, txnType: t.txn_type, mode: t.mode
 
 // Returns true when handled.
 export async function vendorAutoRoutes(h) {
-  const { req, path, query, form, ctx, scope, pool, env, page, base, go, actor, send, res, extra } = h;
+  const { req, path, query, form, ctx, scope, pool, env, page, base, go, takeFlash, actor, send, res, extra } = h;
   const key = () => settingsKey(env);
   let m;
 
   // ---- 1099s ----
+  // Track the ticked vendors (from the "paid over the threshold but not tracked" list).
+  if (path === '/vendors/1099/track' && req.method === 'POST') {
+    try {
+      const n = await track1099(pool, { ...scope, vendorIds: form.getAll('vendor'), actor });
+      go(`/vendors/1099?year=${encodeURIComponent(form.get('year') ?? '')}`, 'ok', `${n} vendor${n === 1 ? '' : 's'} now tracked for 1099.`);
+    } catch (error) {
+      if (!(error instanceof ValidationError)) throw error;
+      go(`/vendors/1099?year=${encodeURIComponent(form.get('year') ?? '')}`, 'error', error.message);
+    }
+    return true;
+  }
   if ((path === '/vendors/1099' || path === '/vendors/1099.csv') && req.method === 'GET') {
     const thisYear = Number(ctx.today.slice(0, 4));
     const year = Number(query.year) >= 2000 && Number(query.year) <= thisYear ? Number(query.year) : thisYear - (Number(ctx.today.slice(5, 7)) < 4 ? 1 : 0);
@@ -53,7 +65,7 @@ export async function vendorAutoRoutes(h) {
       send(res, 200, `${lines.join('\r\n')}\r\n`, { ...extra, 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="1099-${year}.csv"` });
       return true;
     }
-    page(ten99Page({ ...base(), data, years: Array.from({ length: 5 }, (_, i) => thisYear - i) }));
+    page(ten99Page({ ...base(), flash: takeFlash(), data, years: Array.from({ length: 5 }, (_, i) => thisYear - i), canTrack: canAccess(h.who.role, 'POST', '/vendors/1099/track') }));
     return true;
   }
 

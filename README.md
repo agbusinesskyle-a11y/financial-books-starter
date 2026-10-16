@@ -35,7 +35,9 @@ will run these steps for you.
 
 - **Node.js 22**, version 22.9 or newer: <https://nodejs.org> (the "LTS" installer). Check it with `node -v`.
 - **PostgreSQL 16 or newer**: <https://www.postgresql.org/download/>. The installer asks for a password for the
-  `postgres` superuser. Remember it, because you need it once in step 3.
+  `postgres` superuser. Remember it, because you need it once in step 3. The standard installers include the contrib
+  modules the app needs: migration 064 (Tax Books) runs `CREATE EXTENSION IF NOT EXISTS btree_gist`, a trusted
+  extension the app's own database role can install itself.
 - **Git**, if you're getting this from GitHub: <https://git-scm.com>.
 
 ### 2. Get the code and install its packages

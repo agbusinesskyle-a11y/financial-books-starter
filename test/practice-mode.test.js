@@ -1,4 +1,6 @@
 import { test, before, after } from 'node:test';
+import { itemForm, listFields } from './bank-forms.js';
+
 import assert from 'node:assert/strict';
 import { startApp } from './app-harness.js';
 import { freshDb } from './harness.js';
@@ -102,6 +104,10 @@ test('an automatic bank rule only suggests; Refresh adds nothing; Accept needs t
     ['accountId', String(A.bank_fees)], ['memo', ''], ['mode', 'auto'], ['active', '1']]));
   assert.equal(res.status, 303);
   assert.match(await flash(res), /Practice copy: it suggests, it doesn’t add\./);
+  // (#14) Every label says what really happens here.
+  const rulesPage = await (await app.get('/banking/rules')).text();
+  assert.match(rulesPage, /Suggests here · adds automatically when live/);
+  assert.doesNotMatch(rulesPage, />Adds automatically</);
   assert.deepEqual({ txns: await txnCount(), fees: await waiting() }, before, 'saving the rule added nothing');
 
   await ll.query(`INSERT INTO core.transaction (org_id, transaction_id, account_id, amount, currency, posted_date, pending, description_raw, status, revision)
@@ -115,12 +121,18 @@ test('an automatic bank rule only suggests; Refresh adds nothing; Accept needs t
 
   const accept = await app.post('/banking/batch', { account: llId('Operating Checking'), action: 'accept' });
   assert.equal(accept.status, 303);
-  assert.match(await flash(accept), /Practice copy: tick the items to accept\./);
+  assert.match(await flash(accept), /Tick the items first\./);
   assert.equal(await txnCount(), before.txns, 'accept-all took nothing');
 
-  // The same rule, outside practice, would have added them — so practice is what held them back.
+  // The same rule, outside practice, would have added them — so practice is what held them back. (Fees the books may
+  // already hold are left for a person in live books too.)
+  const { possibleDuplicates, getBankItem } = await import('../lib/data/banking.js');
+  const { rows: fees } = await pool().query(`SELECT item_id FROM bank_feed_item WHERE entity_id = $1 AND description = 'MONTHLY SERVICE FEE' AND review_state = 'new' AND NOT pending`, [S.entityId]);
+  let clear = 0;
+  for (const f of fees) if (!(await possibleDuplicates(pool(), { ...S, item: await getBankItem(pool(), { ...S, itemId: f.item_id }) })).length) clear++;
+  assert.ok(clear > 0);
   const live = await pullCompany(pool(), ll, { ...S, env: {} });
-  assert.equal(live.autoAdded, before.fees + 1);
+  assert.equal(live.autoAdded, clear);
 });
 
 test('a transfer leaves the other account’s bank line for a person to match', async () => {
@@ -132,7 +144,7 @@ test('a transfer leaves the other account’s bank line for a person to match', 
   const item = async acct => (await pool().query(`SELECT item_id, review_state FROM bank_feed_item WHERE entity_id = $1 AND ll_account_id = $2 AND description = 'ONLINE TRANSFER'`,
     [S.entityId, llId(acct)])).rows[0];
   const from = await item('Operating Checking');
-  const res = await app.post(`/banking/item/${from.item_id}/transfer`, { other: String(A.savings) });
+  const res = await app.post(`/banking/item/${from.item_id}/transfer`, { other: String(A.savings), rev: (await itemForm(app, from.item_id)).rev });
   assert.equal(res.status, 303);
   assert.equal((await item('Operating Checking')).review_state, 'added');
   assert.equal((await item('Business Savings')).review_state, 'new', 'the savings line waits; it can be matched to the transfer by hand');

@@ -53,6 +53,8 @@ const TXNS = [
   ['05/04/2024', 'Journal Entry', 'JE-4', null, 'Bad debt', [['Accounts Receivable', 0, 150], ['Bad Debt', 150, 0]]],
   // A voided check: QuickBooks shows it with no amounts.
   ['05/10/2024', 'Check', '104', 'Hangar Co', 'Voided', [['Operating', 0, 0], ['Repairs', 0, 0]]],
+  // A card refund paid to a customer: a card credit has no customer, so it stays a journal entry naming them.
+  ['06/15/2024', 'Credit Card Credit', null, 'Flight School', 'Customer paid on the card', [['Visa', 75, 0], ['Rental income', 0, 75]]],
 ];
 const OPEN = [{ side: 'ar', type: 'Invoice', date: '2024-04-05', num: '1003', name: 'Flight School', open: 70000, due: '2024-05-05' },
   { side: 'ap', type: 'Bill', date: '2024-04-20', num: 'B-2', name: 'Hangar Co', open: 25000, due: '2024-05-20' }];
@@ -179,8 +181,21 @@ test('Journal parts: a manifest, every half year once, each titled and holding o
 test('import: native documents, QuickBooks’ open amounts, rebuilt links, every account exactly as QuickBooks', async () => {
   const data = await withOpen();
   const { entityId, summary, docClash, omitted } = await importQboCompany(app.db.pool, { orgId, companyName: 'Test Air', data, actor: 'tester' });
-  assert.deepEqual(summary.byType, { deposit: 2, check: 3, expense: 1, journal_entry: 7, transfer: 1, invoice: 5, payment: 2, bill: 2, bill_payment: 1 });
+  assert.deepEqual(summary.byType, { deposit: 2, check: 3, expense: 1, cc_credit: 1, journal_entry: 7, transfer: 1, invoice: 5, payment: 2, bill: 2, bill_payment: 1 });
   assert.deepEqual(summary.savedAsJournalEntries, { 'Credit Card Credit': 1, 'Journal Entry': 4, Deposit: 1 });
+  // QuickBooks' Credit Card Credit (a card refund) comes over as one: Dr Visa 20.00, Cr Fuel 20.00, from Fuel Stop.
+  const [ccc] = await q(`SELECT t.txn_id, t.total_cents, t.memo, v.display_name AS vendor, a.name AS account FROM txn t LEFT JOIN vendor v ON v.vendor_id = t.vendor_id
+    JOIN account a ON a.account_id = t.account_id WHERE t.entity_id = $1 AND t.source_type = 'Credit Card Credit' AND t.type = 'cc_credit'`, [entityId]);
+  assert.deepEqual([Number(ccc.total_cents), ccc.memo, ccc.vendor, ccc.account], [2000, 'Refund', 'Fuel Stop', 'Visa']);
+  const cccPosts = await q(`SELECT a.name, p.amount_cents FROM posting p JOIN account a ON a.account_id = p.account_id WHERE p.txn_id = $1 ORDER BY a.name`, [ccc.txn_id]);
+  assert.deepEqual(cccPosts.map(p => [p.name, Number(p.amount_cents)]), [['Fuel', -2000], ['Visa', 2000]]);
+  assert.equal((await q('SELECT type FROM txn WHERE txn_id = $1', [ccc.txn_id]))[0].type, 'cc_credit');
+  // The one from a customer keeps the customer on the income it takes back.
+  const fromCustomer = await q(`SELECT t.type, a.name, l.amount_cents, c.display_name AS customer FROM txn t JOIN txn_line l ON l.txn_id = t.txn_id
+    JOIN account a ON a.account_id = l.account_id LEFT JOIN customer c ON c.customer_id = l.customer_id
+    WHERE t.entity_id = $1 AND t.source_type = 'Credit Card Credit' AND t.memo = 'Customer paid on the card' ORDER BY a.name`, [entityId]);
+  assert.deepEqual(fromCustomer.map(r => [r.type, r.name, Number(r.amount_cents), r.customer]),
+    [['journal_entry', 'Rental income', -7500, 'Flight School'], ['journal_entry', 'Visa', 7500, 'Flight School']]);
   assert.deepEqual(docClash, ['Check 2024-01-11 no. 101']);
   // Nothing dropped silently: the voided check is listed, and a line's words with no amount stay in the memo.
   assert.deepEqual(omitted.map(o => [o.type, o.num, o.memo]), [['Check', '104', 'Voided']]);

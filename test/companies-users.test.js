@@ -66,3 +66,14 @@ test('an admin must give a person at least one company', async () => {
   assert.equal(res.status, 422);
   assert.match(await res.text(), /Choose at least one company/);
 });
+
+test('My accountant opens the invite set up for an accountant', async () => {
+  const home = await (await app.get('/home')).text();
+  assert.match(home, /href="\/settings\/users\/new\?for=accountant"[^>]*>My accountant</);
+  const page = await (await app.get('/settings/users/new?for=accountant')).text();
+  assert.match(page, /<h2>Invite your accountant<\/h2>/);
+  assert.match(page, /make adjusting entries/);
+  assert.match(page, /value="standard"[^>]*checked|value="standard" selected|selected[^>]*value="standard"/);
+  const plain = await (await app.get('/settings/users/new')).text();
+  assert.match(plain, /<h2>Invite a user<\/h2>/);
+});

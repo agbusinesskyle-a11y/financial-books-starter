@@ -1,4 +1,5 @@
 import { test, before, after } from 'node:test';
+import { itemForm, picks } from './bank-forms.js';
 import assert from 'node:assert/strict';
 import { startApp } from './app-harness.js';
 import { freshDb } from './harness.js';
@@ -157,7 +158,7 @@ test('no company in the text: the card’s last 4 digits decide; an unknown vend
   assert.ok(Buffer.from(await img.arrayBuffer()).equals(JPEG));
   // After the charge is added from the bank item page, the receipt is settled and the photo attached.
   const vendorId = await saveVendor(pool(), { ...S, actor, fields: { displayName: 'Shell' } });
-  const res = await app.post(`/banking/item/${rec.item_id}/add`, new URLSearchParams([['payee', `v:${vendorId}`], ['line_account', String(A.fuel)], ['line_amount', ''],
+  const res = await app.post(`/banking/item/${rec.item_id}/add`, new URLSearchParams([...await picks(app, rec.item_id), ['rev', (await itemForm(app, rec.item_id)).rev], ['payee', 'Shell'], ['line_account', 'Fuel'], ['line_amount', ''],
     ['line_description', ''], ['memo', '']]));
   assert.equal(res.status, 303);
   await app.get('/receipts');

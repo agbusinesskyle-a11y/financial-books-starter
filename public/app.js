@@ -692,3 +692,206 @@ document.querySelectorAll('[data-editor]').forEach(editor => {
     }
   });
 });
+
+// ---- Bank transactions (stage BR-2): review a For review row in place ----
+// A row's fields point at its own form (form="row-<id>"). With this file, Post/Match goes in the background and the row
+// leaves the list; the next row's category gets the focus. Without it, the browser posts and comes back to the list.
+document.addEventListener('submit', async event => {
+  const form = event.target;
+  if (!(form instanceof HTMLFormElement) || !form.hasAttribute('data-row-form')) return;
+  event.preventDefault();
+  const id = form.id.replace('row-', '');
+  const row = document.querySelector(`tr[data-row="${id}"]`);
+  const msg = row?.querySelector('.row-msg');
+  const button = event.submitter;
+  const body = new URLSearchParams(new FormData(form, button?.name ? button : undefined));
+  if (msg) msg.textContent = '';
+  try {
+    const res = await fetch(form.action, { method: 'POST', body, headers: { accept: 'application/json', 'content-type': 'application/x-www-form-urlencoded' }, credentials: 'same-origin' });
+    const out = await res.json().catch(() => null);
+    if (out?.fresh) {
+      // The rule that filled the row in changed: show the list again (the row as it is now), with the reason.
+      try { sessionStorage.setItem('bank-live', out.error ?? ''); } catch { /* private mode */ }
+      location.hash = `item-${id}`;
+      location.reload();
+      return;
+    }
+    if (!res.ok || !out?.ok) {
+      // Refused: the row's form can be sent again once fixed (a fresh one-time token for it).
+      const once = form.querySelector('input[name=form_once]');
+      if (once && crypto.randomUUID) once.value = crypto.randomUUID().replace(/-/g, '').slice(0, 16);
+      if (msg) {
+        msg.textContent = out?.error ?? 'That didn’t go through. Open the item to review it.';
+        if (out?.create) {
+          for (const kind of ['vendor', 'customer']) {
+            const b = document.createElement('button');
+            b.type = 'submit'; b.name = 'create'; b.value = kind; b.className = 'link'; b.setAttribute('form', form.id);
+            b.textContent = ` Create ${kind} “${out.create}”`;
+            msg.append(b);
+          }
+        }
+        if (out?.duplicate) {
+          const a = document.createElement('a');
+          a.href = `/banking/item/${id}`; a.textContent = ' Open it to match or decide';
+          msg.append(a);
+        }
+      }
+      if (button) button.disabled = false;
+      return;
+    }
+    const next = document.querySelector(`tr[data-row="${out.next}"] input[name=category], tr[data-row="${out.next}"] button`);
+    row?.remove();
+    form.remove();
+    const live = document.querySelector('[data-bank-live]');
+    if (live) live.textContent = out.message;
+    next?.focus();
+  } catch {
+    if (msg) msg.textContent = 'No connection — try again.';
+    if (button) button.disabled = false;
+  }
+});
+// Enter in a row's payee or category posts that row.
+document.addEventListener('keydown', event => {
+  const el = event.target;
+  if (event.key !== 'Enter' || !(el instanceof HTMLInputElement) || !el.form?.hasAttribute('data-row-form')) return;
+  event.preventDefault();
+  el.form.requestSubmit(document.querySelector(`button[form="${el.form.id}"]:not([name])`) ?? undefined);
+});
+
+// ---- bank item: live totals (stage BR-3) ----
+// Amounts typed as 12.50, $1,234.50 or -2.50; anything else counts as nothing.
+const typedCents = text => {
+  const s = String(text ?? '').trim().replace(/^\$/, '').replace(/,/g, '');
+  const neg = s.startsWith('-');
+  const m = /^(\d*)(?:\.(\d{0,2}))?$/.exec(neg ? s.slice(1).replace(/^\$/, '') : s);
+  if (!m || (m[1] === '' && !m[2])) return 0;
+  const c = Number(m[1] || 0) * 100 + Number((m[2] ?? '').padEnd(2, '0'));
+  return neg ? -c : c;
+};
+const usd = c => `${c < 0 ? '−' : ''}$${(Math.abs(c) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+// Match: what's ticked (books transactions, waiting payments, bills or invoices at their amounts) plus adjustments, against
+// the bank amount. The button waits until they're equal; the server checks again.
+function recalcSettle(form) {
+  const target = Number(form.dataset.target);
+  let sum = 0, any = false;
+  form.querySelectorAll('input[name=txn]:checked, input[name=waiting]:checked').forEach(b => { sum += Number(b.dataset.cents); any = true; });
+  form.querySelectorAll('input[name=pay]:checked').forEach(b => { sum += typedCents(form.querySelector(`[name="pay_amt_${b.value}"]`)?.value); any = true; });
+  form.querySelectorAll('input[name=adj_amount]').forEach(i => { const c = typedCents(i.value); if (c) { sum += c; any = true; } });
+  const out = form.querySelector('[data-settle-total]');
+  const diff = target - sum;
+  if (out) out.textContent = any ? `Chosen ${usd(sum)} · Bank ${usd(target)} · ${diff ? `Difference ${usd(diff)}` : 'Difference $0.00 — ready'}` : '';
+  const button = form.querySelector('.form-actions button');
+  if (button) button.disabled = !any || diff !== 0;
+}
+document.querySelectorAll('form[data-settle]').forEach(form => {
+  recalcSettle(form);
+  form.addEventListener('input', () => recalcSettle(form));
+  form.addEventListener('change', event => {
+    // Typing an amount on a bill or invoice ticks it.
+    const m = /^pay_amt_(\d+)$/.exec(event.target.name ?? '');
+    if (m && typedCents(event.target.value) > 0) { const b = form.querySelector(`input[name=pay][value="${m[1]}"]`); if (b) b.checked = true; }
+    recalcSettle(form);
+  });
+});
+// Add: split lines can be added, removed and reset; the split total against the bank amount.
+function recalcSplit(form) {
+  const target = Number(form.dataset.target);
+  const lines = [...form.querySelectorAll('.split-line')];
+  // Lines are numbered as they stand now.
+  lines.forEach((l, i) => { const label = l.querySelector('.field span'); if (label) label.textContent = i ? `Category ${i + 1}` : 'Category'; });
+  const filled = lines.filter(l => l.querySelector('[name$=_account]')?.value.trim() || l.querySelector('[name$=_amount]')?.value.trim());
+  // One line with no amount takes the whole bank amount.
+  const sum = filled.length === 1 && !filled[0].querySelector('[name$=_amount]').value.trim() ? target
+    : filled.reduce((s, l) => s + typedCents(l.querySelector('[name$=_amount]').value), 0);
+  const out = form.querySelector('[data-split-total]');
+  if (out) out.textContent = filled.length > 1 || (filled.length === 1 && sum !== target) ? `Split ${usd(sum)} · Bank ${usd(target)} · Difference ${usd(target - sum)}` : '';
+  const button = form.querySelector('.form-actions button.primary');
+  if (button) button.disabled = filled.length > 0 && sum !== target;
+}
+document.querySelectorAll('form[data-split]').forEach(form => {
+  const box = form.querySelector('[data-split-lines]');
+  if (!box) return;
+  const blank = box.querySelector('.split-line:last-child')?.cloneNode(true);
+  const fresh = () => { const l = blank.cloneNode(true); l.querySelectorAll('input').forEach(i => { i.value = ''; i.removeAttribute('required'); }); l.querySelectorAll('select').forEach(s => { s.selectedIndex = 0; }); return l; };
+  const controls = document.createElement('p');
+  controls.className = 'split-controls';
+  const add = Object.assign(document.createElement('button'), { type: 'button', className: 'link', textContent: 'Add a line' });
+  const reset = Object.assign(document.createElement('button'), { type: 'button', className: 'link', textContent: 'Clear the split' });
+  controls.append(add, ' · ', reset);
+  box.after(controls);
+  const withRemove = line => {
+    if (line.querySelector('[data-remove-line]')) return;
+    const x = Object.assign(document.createElement('button'), { type: 'button', className: 'link small', textContent: 'Remove' });
+    x.dataset.removeLine = '1';
+    x.addEventListener('click', () => { if (box.querySelectorAll('.split-line').length > 1) line.remove(); else line.querySelectorAll('input').forEach(i => { i.value = ''; }); recalcSplit(form); });
+    line.append(x);
+  };
+  box.querySelectorAll('.split-line').forEach(withRemove);
+  add.addEventListener('click', () => { const l = fresh(); withRemove(l); box.append(l); l.querySelector('input')?.focus(); recalcSplit(form); });
+  reset.addEventListener('click', () => {
+    box.querySelectorAll('.split-line').forEach((l, i) => { if (i > 0) l.remove(); else l.querySelectorAll('input').forEach(x => { x.value = ''; }); });
+    recalcSplit(form);
+  });
+  form.addEventListener('input', () => recalcSplit(form));
+  recalcSplit(form);
+});
+
+// Rules import: a chosen file is read into the box it names.
+document.querySelectorAll('input[type=file][data-read-into]').forEach(input => input.addEventListener('change', async () => {
+  const box = document.getElementById(input.dataset.readInto);
+  if (box && input.files?.[0]) box.value = await input.files[0].text();
+}));
+
+// Bank lists: the header box ticks every row on the page.
+document.querySelectorAll('[data-select-all]').forEach(box => {
+  box.hidden = false;
+  const rows = () => [...document.querySelectorAll('input[name=item][form="bank-batch"]')];
+  box.addEventListener('change', () => rows().forEach(r => { r.checked = box.checked; }));
+  document.addEventListener('change', event => { if (event.target.matches?.('input[name=item][form="bank-batch"]')) box.checked = rows().every(r => r.checked); });
+});
+
+// A message kept across a reload of the bank list (a row shown again because its rule changed).
+{
+  const live = document.querySelector('[data-bank-live]');
+  let kept = null;
+  try { kept = sessionStorage.getItem('bank-live'); sessionStorage.removeItem('bank-live'); } catch { /* private mode */ }
+  if (live && kept) live.textContent = kept;
+}
+
+// Pickers (inputs with a list): opening one shows every choice, not only the ones like what's filled in — the browser filters
+// a datalist by the input's value. The value comes back on leaving if nothing was chosen.
+document.addEventListener('focusin', event => {
+  const el = event.target;
+  if (!(el instanceof HTMLInputElement) || !el.list || !el.value || el.dataset.was !== undefined) return;
+  el.dataset.was = el.value;
+  el.dataset.placeholder = el.placeholder;
+  el.placeholder = el.value;
+  el.value = '';
+});
+document.addEventListener('focusout', event => {
+  const el = event.target;
+  if (!(el instanceof HTMLInputElement) || el.dataset.was === undefined) return;
+  // Back only if the person didn't type in it (typing, then deleting it all, clears it on purpose).
+  if (!el.value && el.dataset.typed === undefined) el.value = el.dataset.was;
+  delete el.dataset.typed;
+  el.placeholder = el.dataset.placeholder ?? '';
+  delete el.dataset.was;
+  delete el.dataset.placeholder;
+});
+document.addEventListener('input', event => {
+  const el = event.target;
+  if (el instanceof HTMLInputElement && el.dataset.was !== undefined) el.dataset.typed = '1';
+});
+// Before a form is read (Enter in a picker submits without leaving it), untouched pickers get their value back.
+document.addEventListener('submit', event => {
+  const form = event.target;
+  if (!(form instanceof HTMLFormElement)) return;
+  for (const el of form.elements) {
+    if (el instanceof HTMLInputElement && el.dataset.was !== undefined && !el.value && el.dataset.typed === undefined) el.value = el.dataset.was;
+  }
+}, true);
+// Enter in an untouched picker: its value is back before the browser checks the form (a required field) and submits it.
+document.addEventListener('keydown', event => {
+  const el = event.target;
+  if (event.key === 'Enter' && el instanceof HTMLInputElement && el.dataset.was !== undefined && !el.value && el.dataset.typed === undefined) el.value = el.dataset.was;
+}, true);
