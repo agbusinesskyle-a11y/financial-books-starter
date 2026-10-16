@@ -367,6 +367,19 @@ test('ported: a bank review batch, "all N matching" included, takes at most a ba
   assert.notEqual((await v.post('/banking/batch', [['account', 'x'], ['all', 'exclude:3']])).status, 403, 'a few are fine (no such account here)');
 });
 
+test('ported: tracking vendors for 1099s takes at most a batch’s worth in the demo (Codex starter-port r1 B1)', async () => {
+  const v = await visitor(base).start();
+  const ids = (await pool().query('SELECT vendor_id FROM vendor ORDER BY vendor_id')).rows.map(r => String(r.vendor_id));
+  const list = k => Array.from({ length: k }, (_, i) => ['vendor', ids[i % ids.length] ?? String(900000 + i)]);
+  const tracked = async () => n('SELECT count(*) AS n FROM vendor WHERE track_1099');
+  const before = await tracked();
+  const res = await v.post('/vendors/1099/track', [['year', '2026'], ...list(DEMO_BATCH_MAX + 1)]);
+  assert.equal(res.status, 403);
+  assert.match(await res.text(), new RegExp(`at most ${DEMO_BATCH_MAX} at a time`));
+  assert.equal(await tracked(), before, 'nothing changed');
+  assert.equal((await v.post('/vendors/1099/track', [['year', '2026'], ...list(DEMO_BATCH_MAX)])).status, 303, 'a full batch is taken');
+});
+
 test('ported: imported tax baselines are something a demo never has, and the baseline import refuses the demo', async () => {
   const other = await freshDb();
   try {

@@ -1,3 +1,4 @@
+import { isDemo, DEMO_BATCH_MAX } from '../../lib/domain/demo.js';
 import { HttpError } from './http.js';
 import { ValidationError } from '../../lib/data/writes.js';
 import { verifiedMonths, bankAccounts, listBankItems, tabCounts, getBankItem, matchCandidates, matchItem, addItem, addItemTx, transferItem, excludeItems, excludeItemsTx, undoItem,
@@ -357,6 +358,8 @@ export async function bankingRoutes(h) {
     const { rows: [sel] } = id ? await pool.query(`DELETE FROM bank_batch_selection WHERE org_id = $1 AND entity_id = $2 AND selection_id = $3 AND actor = $4
         AND created_at > now() - interval '1 hour' RETURNING *`, [scope.orgId, scope.entityId, id, actor]) : { rows: [] };
     if (!sel) return go('/banking', 'warn', 'That list has expired or was already done. Show the list again.') ?? true;
+    // In the public demo the recorded list itself is held to the batch limit too, not only the request that made it.
+    if (isDemo(h.env) && sel.items.length > DEMO_BATCH_MAX) return go('/banking', 'warn', `That list has ${sel.items.length} items; the demo does at most ${DEMO_BATCH_MAX} at a time.`) ?? true;
     const back = `/banking?${new URLSearchParams({ account: sel.ll_account_id, tab: sel.tab, ...Object.fromEntries(new URLSearchParams(sel.list)) })}`;
     const tokens = new Map(sel.items.map(([itemId, token]) => [Number(itemId), token]));
     let results;

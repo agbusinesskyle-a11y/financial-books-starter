@@ -178,9 +178,9 @@ test('batch Accept leaves a wording suggestion for a person; posted as shown it 
 
 test('a processor prefix alone, or a store name the books have never seen, is no likeness (Codex S1 #2)', () => {
   const row = (id, date, memo, category) => ({ txn_id: id, txn_date: date, memo, party: 'v:9', category, cents: -1000 });
-  const w = buildWording([row(1, '2026-01-01', 'SP 10XHEALTHSYSTEM', 5), row(2, '2026-02-01', 'SP 10XHEALTHSYSTEM', 5), row(3, '2026-03-01', 'SP 10XHEALTHSYSTEM', 5),
-    row(4, '2026-03-02', 'SP 10XHEALTHSYSTEM', 5)]);
-  assert.equal(wordingSuggestion(w, { description: 'SP LASTREGA-LUNABOUTIQ', amount_cents: -2500 }), null);
+  const w = buildWording([row(1, '2026-01-01', 'SP KESTRELWELLNESS', 5), row(2, '2026-02-01', 'SP KESTRELWELLNESS', 5), row(3, '2026-03-01', 'SP KESTRELWELLNESS', 5),
+    row(4, '2026-03-02', 'SP KESTRELWELLNESS', 5)]);
+  assert.equal(wordingSuggestion(w, { description: 'SP MARLOWE-FIGBOUTIQ', amount_cents: -2500 }), null);
   const v = buildWording([row(1, '2026-01-01', 'SQ *WILLET CHAPEL', 6), row(2, '2026-02-01', 'SQ *WILLET CHAPEL', 6), row(3, '2026-03-01', 'SQ *WILLET CHAPEL', 6)]);
   assert.equal(wordingSuggestion(v, { description: 'SQ *CORNER BAKERY', amount_cents: -900 }), null);
   assert.equal(wordingSuggestion(v, { description: 'SQ *WILLET CHAPEL', amount_cents: -900 }).confidence, 'high');

@@ -83,7 +83,7 @@ CREATE TABLE tax_profile (
   CHECK ((return_type = 'disregarded') = (activity_kind IS NOT NULL))
 );
 
--- §4.3 One return period. Revisions arrive in T3 (064). A period for an edition with no catalog computes nothing.
+-- §4.3 One return period. Revisions arrive in T3 (the next tax migration). A period for an edition with no catalog computes nothing.
 CREATE TABLE tax_return (
   org_id bigint NOT NULL REFERENCES org (org_id),
   return_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
