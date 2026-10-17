@@ -11,6 +11,7 @@ import { listInterests, saveInterest, endInterest, rosterFor } from '../../lib/t
 import { inclusionSources } from '../../lib/tax/bindings.js';
 import { reportingChain } from '../../lib/tax/reporting.js';
 import { mappingRoutes } from './tax-mapping-routes.js';
+import { isDemo, DEMO_BATCH_MAX } from '../../lib/domain/demo.js';
 
 // Tax Books T1 (spec §8): /tax and /tax/:entity/profile (+ parties, activities, periods, inclusions). The company in the path
 // must be one the person may open; the accountant's edit right is the company flag accountant_may_edit.
@@ -121,6 +122,9 @@ export async function taxRoutes(h) {
   if (!canEdit) throw new HttpError(403, 'This company does not let the accountant change its tax setup.');
   // go() writes the 303 and returns nothing; true tells the dispatcher this request is handled so no later route runs.
   const back = () => { go(`/tax/${company.entityId}/profile`, 'ok', 'Saved.'); return true; };
+  // The public demo copies at most a batch's worth of company defaults per request (opening a period, including books); null elsewhere.
+  const maxSets = isDemo(env) ? DEMO_BATCH_MAX : null;
+  const leftNote = r => (r.left ? ` This demo copies at most ${DEMO_BATCH_MAX} company defaults at a time: ${r.left} more ${r.left === 1 ? 'is' : 'are'} left unmapped — copy them from the period’s mapping page (Copy the company defaults), as often as needed.` : '');
   try {
     if (m[2] === 'profile') {
       const v = { returnType: form.get('return_type') ?? '', activityKind: form.get('activity_kind') ?? '', taxMethod: form.get('tax_method') ?? '', bookBasis: form.get('book_basis') ?? '',
@@ -152,7 +156,11 @@ export async function taxRoutes(h) {
       await resolveOwnTaxIdConflict(pool, { ...scope, partyId: Number(m[3]), evidenceId: form.get('evidence_id'), keep: form.get('keep'), actor });
     }
     if (m[2] === 'activities') await saveActivity(pool, { ...scope, fields: { kind: form.get('kind'), name: form.get('name'), schedule: form.get('schedule'), from: form.get('from'), to: form.get('to'), disposedOn: form.get('disposed_on') } });
-    if (m[2] === 'periods') await openPeriod(pool, { ...scope, year: Number(form.get('year')), initial: form.get('initial') === '1', periodStart: form.get('period_start') || null, actor });
+    if (m[2] === 'periods') {
+      const report = {};
+      await openPeriod(pool, { ...scope, year: Number(form.get('year')), initial: form.get('initial') === '1', periodStart: form.get('period_start') || null, actor, maxSets, report });
+      if (report.left) { go(`/tax/${company.entityId}/profile`, 'ok', `Saved.${leftNote(report)}`); return true; }
+    }
     if (m[2] === 'initial') {
       if (!canVerifyInitial) throw new HttpError(403, 'Only an admin verifies a first year.');
       await verifyInitial(pool, { ...scope, returnId: Number(m[3]), verifiedBy: actor, evidence: form.get('evidence') ?? '' });
@@ -164,9 +172,10 @@ export async function taxRoutes(h) {
       const mayEdit = async id => mayOpen(id) && (who.role === 'admin' || (who.role === 'reports' && (await getProfile(pool, { orgId, entityId: id })).accountant_may_edit === true));
       const report = {};
       await includeBooks(pool, { ...scope, returnId: Number(form.get('return_id')), activityId: Number(form.get('activity_id')), sourceEntityId: companyOf(form.get('source_entity_id')).entityId, approvedBy: actor,
-        canOpen: mayOpen, canEdit: mayEdit, report });
+        canOpen: mayOpen, canEdit: mayEdit, report, maxSets });
       const n = report.pendingReturns?.length ?? 0;
-      if (n) { go(`/tax/${company.entityId}/profile`, 'ok', `Saved. ${n} return${n === 1 ? '' : 's'} above this company ${n === 1 ? 'was' : 'were'} not updated because you may not edit ${n === 1 ? 'it' : 'them'}: someone who may copies the company defaults there from its mapping page.`); return true; }
+      if (n) { go(`/tax/${company.entityId}/profile`, 'ok', `Saved. ${n} return${n === 1 ? '' : 's'} above this company ${n === 1 ? 'was' : 'were'} not updated because you may not edit ${n === 1 ? 'it' : 'them'}: someone who may copies the company defaults there from its mapping page.${leftNote(report)}`); return true; }
+      if (report.left) { go(`/tax/${company.entityId}/profile`, 'ok', `Saved.${leftNote(report)}`); return true; }
     }
     return back();
   } catch (error) {

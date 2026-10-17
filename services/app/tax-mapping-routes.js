@@ -14,6 +14,7 @@ import { suggestionsFor, acceptSuggestion, acceptAllSure } from '../../lib/tax/s
 import { parseWhat } from '../../lib/tax/destinations.js';
 import { taxMappingPage } from '../../lib/views/tax-mapping.js';
 import { reportingChain } from '../../lib/tax/reporting.js';
+import { isDemo, DEMO_BATCH_MAX } from '../../lib/domain/demo.js';
 
 const ROWS = 4;
 // The rows of the mapping form: what_i ("treatment:destination"), share_i, amount_i, activity_i, owner_i, k1_i, label_i; memo is shared.
@@ -30,7 +31,9 @@ function rowsFrom(form) {
 const fromOf = v => (/^\d{1,6}$/.test(String(v ?? '')) ? Number(v) : 0);
 
 export async function mappingRoutes(h, { company, year, action }) {
-  const { req, query, form, ctx, pool, page, base, go, takeFlash, actor, who } = h;
+  const { req, query, form, ctx, pool, page, base, go, takeFlash, actor, who, env } = h;
+  // The public demo: copy-forward copies, and Accept all sure offers, at most a batch's worth per request (null elsewhere).
+  const demoMax = isDemo(env) ? DEMO_BATCH_MAX : null;
   const orgId = ctx.orgId, scope = { orgId, entityId: company.entityId };
   const { rows: [ret] } = await pool.query('SELECT return_id, return_type, period_start::text AS s, period_end::text AS e FROM tax_return WHERE org_id = $1 AND entity_id = $2 AND period_end = $3::date', [orgId, company.entityId, `${year}-12-31`]);
   if (!ret) throw new HttpError(404, 'No tax period for that year');
@@ -73,7 +76,7 @@ export async function mappingRoutes(h, { company, year, action }) {
       focus = { source: s, account: a, lines: live, from };
     }
     const [suggestions, parties, activities] = await Promise.all([suggestionsFor(pool, { orgId, cov, companyIds }), nameable(), listActivities(pool, scope)]);
-    page(taxMappingPage({ ...base(), flash: takeFlash(), company, year, cov, suggestions, focus, parties, activities, canEdit, filter: query.show === 'all' ? 'all' : 'open', error }), status);
+    page(taxMappingPage({ ...base(), flash: takeFlash(), company, year, cov, suggestions, focus, parties, activities, canEdit, sureMax: demoMax, filter: query.show === 'all' ? 'all' : 'open', error }), status);
   };
   if (!action) {
     if (req.method !== 'GET') throw new HttpError(405, 'Method not allowed');
@@ -131,8 +134,9 @@ export async function mappingRoutes(h, { company, year, action }) {
     if (action === 'copy-forward') {
       // Only books the person may open, with every company on their inclusion path (spec §11) — checked inside the copy, on the paths as
       // they are under the graph lock (Codex r3 R3-N3).
-      const r = await copyForward(pool, { ...scope, returnId, canOpen, actor });
-      return back(null, null, `Copied ${r.copied} mapping${r.copied === 1 ? '' : 's'} from the company defaults.${r.skipped.length ? ` ${r.skipped.length} default${r.skipped.length === 1 ? '' : 's'} need a person: ${r.skipped.slice(0, 3).map(x => `${x.accountName}: ${x.reason}`).join(' ')}` : ''}`);
+      const r = await copyForward(pool, { ...scope, returnId, canOpen, actor, maxSets: demoMax });
+      const more = r.left ? ` This demo copies at most ${DEMO_BATCH_MAX} accounts at a time: ${r.left} more ${r.left === 1 ? 'is' : 'are'} left unmapped — copy again to continue.` : '';
+      return back(null, null, `Copied ${r.copied} mapping${r.copied === 1 ? '' : 's'} from the company defaults.${more}${r.skipped.length ? ` ${r.skipped.length} default${r.skipped.length === 1 ? '' : 's'} need a person: ${r.skipped.slice(0, 3).map(x => `${x.accountName}: ${x.reason}`).join(' ')}` : ''}`);
     }
     throw new HttpError(404, 'Not found');
   } catch (error) {

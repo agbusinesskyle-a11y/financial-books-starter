@@ -490,3 +490,182 @@ test('ported T2: the nightly reset empties every table migration 065 makes', asy
     assert.deepEqual(await counts(), Object.fromEntries(t2Tables.map(t => [t, 0])));
   } finally { await other.drop(); }
 });
+
+// ---- Tax Books T2, Codex starter-port-t2 r1: copying company defaults is held to a batch's worth too ----
+
+// A separate demo database with its own demo app, for the tests that build tax mappings (the shared one stays as the sample has it).
+async function taxDemo() {
+  const other = await freshDb();
+  await resetDemo(other.pool, { env: { DEMO_MODE: '1' }, asOf: AS_OF });
+  const server = http.createServer(createApp({ pool: other.pool, env: DEMO, now: () => new Date(`${AS_OF}T17:00:00Z`), demoCheckMs: 10 * 60_000 }));
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  servers.push(server);
+  const { org_id: orgId, entity_id: entityId } = (await other.pool.query('SELECT org_id, entity_id FROM entity ORDER BY entity_id LIMIT 1')).rows[0];
+  const scope = { orgId: Number(orgId), entityId: Number(entityId) };
+  const q = async (sql, args) => Number((await other.pool.query(sql, args)).rows[0].n);
+  const { saveProfile } = await import('../lib/tax/periods.js');
+  await saveProfile(other.pool, { ...scope, fields: { returnType: 'form_1065', taxMethodDefault: 'accrual', bookBasisDefault: 'accrual', yearEndMonth: 12 }, reason: 'setup', actor: 'tester' });
+  return { other, scope, q, base: `http://127.0.0.1:${server.address().port}` };
+}
+// New accounts of one type in the demo's sample company; returns their ids in creation order.
+async function newAccounts(pool, scope, prefix, type, k) {
+  const { saveAccount } = await import('../lib/data/ledger.js');
+  const ids = [];
+  for (let i = 0; i < k; i++) {
+    const name = `${prefix} ${String(i + 1).padStart(2, '0')}`;
+    await saveAccount(pool, { ...scope, fields: { name, number: '', type, parentId: '', description: '', active: true } });
+    ids.push(Number((await pool.query('SELECT account_id FROM account WHERE org_id = $1 AND entity_id = $2 AND name = $3', [scope.orgId, scope.entityId, name])).rows[0].account_id));
+  }
+  return ids;
+}
+const setsOf = (q, returnId) => q('SELECT count(*) AS n FROM (SELECT DISTINCT source_entity_id, account_id, measurement FROM tax_binding WHERE return_id = $1) s', [returnId]);
+const returnOf = async (pool, scope, year) => Number((await pool.query('SELECT return_id FROM tax_return WHERE org_id = $1 AND entity_id = $2 AND period_end = $3::date',
+  [scope.orgId, scope.entityId, `${year}-12-31`])).rows[0].return_id);
+const flashAfter = async (v, res) => (await (await v.get(new URL(res.headers.get('location'), 'http://x').pathname)).text());
+
+test('r1 B1: opening a period and "Copy the company defaults" copy at most a batch’s worth of mapping sets in the demo; copying again finishes', async () => {
+  const { other, scope, q, base: b } = await taxDemo();
+  try {
+    const { openPeriod } = await import('../lib/tax/periods.js');
+    const { saveBindings, copyForward } = await import('../lib/tax/bindings.js');
+    const r25 = Number(await openPeriod(other.pool, { ...scope, year: 2025, actor: 'tester' }));
+    const r27 = Number(await openPeriod(other.pool, { ...scope, year: 2027, actor: 'tester' })); // opened before any default exists: unmapped
+    // DEMO_BATCH_MAX + 1 reusable company defaults, each a whole account/measurement set.
+    const ids = await newAccounts(other.pool, scope, 'Demo cost', 'expense', DEMO_BATCH_MAX + 1);
+    for (const [i, accountId] of ids.entries()) {
+      await saveBindings(other.pool, { ...scope, returnId: r25, sourceEntityId: scope.entityId, accountId, measurement: 'activity', makeDefault: true, actor: 'tester',
+        rows: [{ treatment: 'statement_row', destination: 'f1065.p1.21', rowLabel: `Demo cost ${i + 1}` }] });
+    }
+    assert.equal(await q('SELECT count(*) AS n FROM tax_binding_default'), DEMO_BATCH_MAX + 1);
+    const postings = await q('SELECT count(*) AS n FROM posting');
+    const v = await visitor(b).start();
+
+    // Opening a period copies the defaults automatically: the first DEMO_BATCH_MAX, in account order; the visitor is told what is left.
+    const opened = await v.post(`/tax/${scope.entityId}/periods`, [['year', '2026']]);
+    assert.equal(opened.status, 303);
+    assert.match(await flashAfter(v, opened), new RegExp(`at most ${DEMO_BATCH_MAX} company defaults at a time: 1 more is left unmapped`));
+    const r26 = await returnOf(other.pool, scope, 2026);
+    assert.equal(await setsOf(q, r26), DEMO_BATCH_MAX);
+    assert.equal(await q('SELECT count(*) AS n FROM tax_binding WHERE return_id = $1 AND account_id = $2', [r26, ids.at(-1)]), 0, 'the last account in order is the one left');
+    // The rest are copied from the mapping page.
+    const more = await v.post(`/tax/${scope.entityId}/2026/mapping/copy-forward`);
+    assert.equal(more.status, 303);
+    assert.match(await flashAfter(v, more), /Copied 1 mapping from the company defaults\./);
+    assert.equal(await setsOf(q, r26), DEMO_BATCH_MAX + 1);
+
+    // The explicit copy into a period that has none: DEMO_BATCH_MAX, then the last one, then nothing more.
+    const first = await v.post(`/tax/${scope.entityId}/2027/mapping/copy-forward`);
+    assert.equal(first.status, 303);
+    assert.match(await flashAfter(v, first), new RegExp(`Copied ${DEMO_BATCH_MAX} mappings from the company defaults\\. This demo copies at most ${DEMO_BATCH_MAX} accounts at a time: 1 more is left unmapped — copy again to continue\\.`));
+    assert.equal(await setsOf(q, r27), DEMO_BATCH_MAX);
+    const second = await v.post(`/tax/${scope.entityId}/2027/mapping/copy-forward`);
+    assert.match(await flashAfter(v, second), /Copied 1 mapping from the company defaults\.(?! This demo)/);
+    assert.equal(await setsOf(q, r27), DEMO_BATCH_MAX + 1);
+    const third = await v.post(`/tax/${scope.entityId}/2027/mapping/copy-forward`);
+    assert.match(await flashAfter(v, third), /Copied 0 mappings/);
+    assert.equal(await setsOf(q, r27), DEMO_BATCH_MAX + 1);
+    assert.equal(await q('SELECT count(*) AS n FROM posting'), postings, 'the ledger is untouched');
+    assert.deepEqual(await demoProblems(other.pool), []);
+
+    // Outside the demo nothing changed: one copy takes every default.
+    const { rows: [{ return_id: r28 }] } = await other.pool.query(`INSERT INTO tax_return (org_id, entity_id, period_start, period_end, return_type, form_edition, tax_method, book_basis)
+      VALUES ($1, $2, '2028-01-01', '2028-12-31', 'form_1065', 2028, 'accrual', 'accrual') RETURNING return_id`, [scope.orgId, scope.entityId]);
+    const all = await copyForward(other.pool, { ...scope, returnId: r28, actor: 'tester' });
+    assert.deepEqual([all.sets, all.left], [DEMO_BATCH_MAX + 1, 0]);
+  } finally { await other.drop(); }
+});
+
+test('r1 B1: including books copies at most the limit (one budget shared by every return it reaches); a whole split set is never cut', async () => {
+  const { t2Db, company, acct, period, activity } = await import('./tax-t2-fixtures.js');
+  const { includeBooks } = await import('../lib/tax/activities.js');
+  const { saveBindings, copyForward } = await import('../lib/tax/bindings.js');
+  const t = await t2Db();
+  try {
+    const P = { orgId: t.orgId, entityId: await company(t.pool, t.orgId, 'Cap Partners') };
+    const D = { orgId: t.orgId, entityId: await company(t.pool, t.orgId, 'Cap Single LLC') };
+    const p25 = await period(t.pool, P, 2025), p26 = await period(t.pool, P, 2026);
+    await period(t.pool, D, 2025, 'disregarded'); await period(t.pool, D, 2026, 'disregarded');
+    const act = await activity(t.pool, P, { name: 'Cap trade' });
+    await includeBooks(t.pool, { ...P, returnId: p25, activityId: act, sourceEntityId: D.entityId, approvedBy: 'tester' });
+    const ids = [];
+    for (let i = 0; i < 4; i++) ids.push(await acct(t.pool, D, `Cap cost ${i + 1}`, 'expense'));
+    // The first set is a two-row split: it counts as one set and is copied whole.
+    await saveBindings(t.pool, { ...P, returnId: p25, sourceEntityId: D.entityId, accountId: ids[0], measurement: 'activity', split: 'shares', makeDefault: true, actor: 'tester',
+      rows: [{ treatment: 'statement_row', destination: 'f1065.p1.21', rowLabel: 'Cap A', share: '1/2', activityId: act }, { treatment: 'input', destination: 'f1065.p1.13', share: '1/2', activityId: act }] });
+    for (const id of ids.slice(1)) await saveBindings(t.pool, { ...P, returnId: p25, sourceEntityId: D.entityId, accountId: id, measurement: 'activity', makeDefault: true, actor: 'tester',
+      rows: [{ treatment: 'statement_row', destination: 'f1065.p1.21', rowLabel: `Cap ${id}`, activityId: act }] });
+    const report = {};
+    await includeBooks(t.pool, { ...P, returnId: p26, activityId: act, sourceEntityId: D.entityId, approvedBy: 'tester', report, maxSets: 2 });
+    assert.deepEqual([report.sets, report.left], [2, 2]);
+    const rows = (await t.pool.query('SELECT account_id FROM tax_binding WHERE return_id = $1 ORDER BY account_id', [p26])).rows.map(r => Number(r.account_id));
+    assert.deepEqual(rows, [ids[0], ids[0], ids[1]], 'the split set whole, then the next account');
+    const rest = await copyForward(t.pool, { ...P, returnId: p26, actor: 'tester', maxSets: 2 });
+    assert.deepEqual([rest.sets, rest.left], [2, 0]);
+  } finally { await t.db.drop(); }
+});
+
+test('r1 note 2-3: "Accept all sure" offers the first batch’s worth of real decisions in the demo; those succeed, one more is refused untouched', async () => {
+  const { other, scope, q, base: b } = await taxDemo();
+  try {
+    const { openPeriod } = await import('../lib/tax/periods.js');
+    const { coverage } = await import('../lib/tax/coverage.js');
+    const { suggestionsFor } = await import('../lib/tax/suggest.js');
+    const { saveJournalEntry } = await import('../lib/data/ledger-tools.js');
+    const returnId = Number(await openPeriod(other.pool, { ...scope, year: 2026, actor: 'tester' }));
+    // Bank accounts with balances: each one's beginning and ending balance is a sure Schedule L suggestion.
+    const banks = await newAccounts(other.pool, scope, 'Demo bank', 'bank', 16);
+    const [equity] = await newAccounts(other.pool, scope, 'Demo capital', 'equity', 1);
+    await saveJournalEntry(other.pool, { ...scope, txnId: null, actor: 'tester', txnDate: '2025-12-01', docNumber: '', memo: 'Demo balances',
+      lines: [...banks.map(id => ({ accountId: String(id), debit: '100.00', credit: '', description: '' })), { accountId: String(equity), debit: '', credit: (banks.length * 100).toFixed(2), description: '' }] });
+    const v = await visitor(b).start();
+    const page = await (await v.get(`/tax/${scope.entityId}/2026/mapping`)).text();
+    const shown = [...page.matchAll(/name="sure" value="([^"]+)"/g)].map(m => m[1].replace(/&amp;/g, '&'));
+    const all = (await suggestionsFor(other.pool, { orgId: scope.orgId, cov: await coverage(other.pool, { ...scope, returnId }), companyIds: [scope.entityId] })).filter(s => s.sure).map(s => s.decision);
+    assert.ok(all.length > DEMO_BATCH_MAX, `${all.length} sure suggestions`);
+    assert.deepEqual(shown, all.slice(0, DEMO_BATCH_MAX), 'the form sends the first batch’s worth, in page order');
+    assert.match(page, new RegExp(`This demo accepts at most ${DEMO_BATCH_MAX} at a time`));
+    assert.match(page, new RegExp(`Accept the first ${DEMO_BATCH_MAX} sure`));
+    const counts = async () => [await q('SELECT count(*) AS n FROM tax_binding'), await q('SELECT count(*) AS n FROM tax_binding_default'), await q('SELECT count(*) AS n FROM tax_binding_suggestion')];
+    // One real decision more than the limit: refused, nothing written.
+    const over = await v.post(`/tax/${scope.entityId}/2026/mapping/accept-sure`, all.slice(0, DEMO_BATCH_MAX + 1).map(k => ['sure', k]));
+    assert.equal(over.status, 403);
+    assert.deepEqual(await counts(), [0, 0, 0]);
+    // The form as the page rendered it: every one accepted.
+    const ok = await v.post(`/tax/${scope.entityId}/2026/mapping/accept-sure`, shown.map(k => ['sure', k]));
+    assert.equal(ok.status, 303);
+    assert.match(await flashAfter(v, ok), new RegExp(`Accepted ${DEMO_BATCH_MAX} sure suggestions\\.`));
+    assert.deepEqual(await counts(), [DEMO_BATCH_MAX, DEMO_BATCH_MAX, DEMO_BATCH_MAX]);
+  } finally { await other.drop(); }
+});
+
+test('r1 note 3: the reset empties line attributions and suggestions too, and refuses (never wipes) a stored EIN candidate', async () => {
+  const { other, scope, q } = await taxDemo();
+  try {
+    const { openPeriod } = await import('../lib/tax/periods.js');
+    const { attributeLine } = await import('../lib/tax/bindings.js');
+    const { acceptSuggestion, suggestionsFor } = await import('../lib/tax/suggest.js');
+    const { coverage } = await import('../lib/tax/coverage.js');
+    const { saveJournalEntry } = await import('../lib/data/ledger-tools.js');
+    const { saveParty } = await import('../lib/tax/parties.js');
+    const returnId = Number(await openPeriod(other.pool, { ...scope, year: 2026, actor: 'tester' }));
+    const [cost] = await newAccounts(other.pool, scope, 'Demo line cost', 'expense', 1);
+    const [bank] = await newAccounts(other.pool, scope, 'Demo line bank', 'bank', 1);
+    const txnId = await saveJournalEntry(other.pool, { ...scope, txnId: null, actor: 'tester', txnDate: '2026-03-01', docNumber: '', memo: 'Demo line',
+      lines: [{ accountId: String(cost), debit: '50.00', credit: '', description: '' }, { accountId: String(bank), debit: '', credit: '50.00', description: '' }] });
+    const { line_no: lineNo } = (await other.pool.query('SELECT line_no FROM posting WHERE txn_id = $1 AND account_id = $2', [txnId, cost])).rows[0];
+    await attributeLine(other.pool, { ...scope, returnId, sourceEntityId: scope.entityId, accountId: cost, txnId, lineNo, expectTxnVersion: (await other.pool.query('SELECT txn_version($1) AS v', [txnId])).rows[0].v, target: { treatment: 'statement_row', destination: 'f1065.p1.21', rowLabel: 'Demo line' }, actor: 'tester' });
+    const [s] = (await suggestionsFor(other.pool, { orgId: scope.orgId, cov: await coverage(other.pool, { ...scope, returnId }), companyIds: [scope.entityId] })).filter(x => x.sure);
+    await acceptSuggestion(other.pool, { ...scope, returnId, companyIds: [scope.entityId], decision: s.decision, actor: 'tester' });
+    assert.ok(await q('SELECT count(*) AS n FROM tax_binding_line') > 0 && await q('SELECT count(*) AS n FROM tax_binding_suggestion') > 0);
+    assert.deepEqual(await demoProblems(other.pool), []);
+    await resetDemo(other.pool, { env: { DEMO_MODE: '1' }, asOf: AS_OF });
+    for (const t of ['tax_binding_line', 'tax_binding_suggestion', 'tax_binding', 'tax_binding_default', 'tax_return']) assert.equal(await q(`SELECT count(*) AS n FROM ${t}`), 0, t);
+    // An EIN candidate kept as evidence holds ciphertext: a demo never has one, and the reset refuses rather than wiping it.
+    const partyId = Number(await saveParty(other.pool, { orgId: scope.orgId, fields: { kind: 'entity_in_org', name: 'Sample own party', entityId: scope.entityId, taxId: '' }, env: {} }));
+    await other.pool.query(`INSERT INTO tax_party_tax_id_evidence (org_id, party_id, entity_id, party_tax_id_enc, party_tax_id_last4, company_ein_enc, company_ein_last4)
+      VALUES ($1, $2, $3, 'placeholder-a', '1111', 'placeholder-b', '2222')`, [scope.orgId, partyId, scope.entityId]);
+    assert.match((await demoProblems(other.pool)).join('\n'), /stored secrets \(tax_party_tax_id_evidence\.company_ein_enc: 1\)[^]*tax_party_tax_id_evidence\.party_tax_id_enc: 1/);
+    await assert.rejects(resetDemo(other.pool, { env: { DEMO_MODE: '1' }, asOf: AS_OF }), /holds things a demo never makes[^]*tax_party_tax_id_evidence/);
+    assert.equal(await q('SELECT count(*) AS n FROM tax_party_tax_id_evidence'), 1, 'nothing was wiped');
+  } finally { await other.drop(); }
+});
