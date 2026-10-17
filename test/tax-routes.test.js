@@ -52,9 +52,12 @@ test('menu and roles: Tax sits in Accounting; everyone who keeps books sees it; 
   }
 });
 
-test('/tax lists every company the person may open with its tax setup; computed parts say not yet available', async () => {
+test('/tax opens the company the person works in; All returns (every company, org admins) says computed parts are not yet available', async () => {
   await createCompany(pool, { orgId: S.orgId, name: 'Second Ranch', timeZone: 'America/Chicago' });
-  const body = await (await app.get('/tax')).text();
+  // T2 (the owner's scoping): the Tax section is per company; the org-wide table moved to /tax/all.
+  const here = await (await app.get('/tax')).text();
+  assert.ok(here.includes('<h1>Tax setup: Sample Feed Co.</h1>') && !here.includes('<h1>All returns</h1>'), '/tax is the current company’s page');
+  const body = await (await app.get('/tax/all')).text();
   for (const s of ['Sample Feed Co.', 'Second Ranch', 'Not set up', 'Not yet available', `href="/tax/${S.entityId}/profile"`]) assert.ok(body.includes(s), `page shows ${s}`);
   assert.doesNotMatch(body, /\$[0-9]/, 'no computed amounts in T1');
 });
@@ -68,12 +71,14 @@ test('the profile page saves defaults, parties, activities and opens a period; r
   assert.equal(res.status, 422); assert.match(await errorOf(res), /reason/);
   res = await app.post(`/tax/${S.entityId}/parties`, { kind: 'individual', name: 'Pat Owner', tax_id: '' });
   assert.equal(res.status, 303, await errorOf(res));
+  assert.ok((await (await app.get('/tax/parties')).text()).includes('Pat Owner'), 'the party directory (T2: its own admin page) lists the new party');
   res = await app.post(`/tax/${S.entityId}/activities`, { kind: 'holding', name: 'Own activity', schedule: 'p1', from: '2017-01-05', to: '', disposed_on: '' });
   assert.equal(res.status, 303, await errorOf(res));
   res = await app.post(`/tax/${S.entityId}/periods`, { year: '2025', initial: '' });
   assert.equal(res.status, 303, await errorOf(res));
   page = await (await app.get(`/tax/${S.entityId}/profile`)).text();
-  for (const s of ['Pat Owner', 'Own activity', '2025', 'Owners and capital', 'available in a later stage']) assert.ok(page.includes(s), s);
+  for (const s of ['Own activity', '2025', 'Owners and members', 'available in a later stage']) assert.ok(page.includes(s), s);
+  assert.ok(!page.includes('<h2>Parties</h2>'), 'a company page lists its own owners, not the org-wide party directory');
   // Another company's profile is not reachable through this company's path, and an unknown company is a 404.
   assert.equal((await app.get('/tax/999999/profile')).status, 404);
 });

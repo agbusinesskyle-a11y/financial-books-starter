@@ -96,7 +96,8 @@ test('a provider switch replaces the whole related packet atomically, refuses a 
   await assert.rejects(switchTo({}), /no packet from manual/);
   // A source slice still consumed by another live packet cannot be consumed again by a replacement.
   const interest = 'f1065.p1.15|activity';
-  await assignPacket(pool, { ...S, returnId, request: request([interest]), packet: packet([{ slotKey: interest, amountCents: '700' }], { sourceVersion: 'books@int', consumedSlices: [slice('t:5')] }) });
+  // Another provider's own records (a books packet consumes only canonical books slices since Codex t2-r2 B2b).
+  await assignPacket(pool, { ...S, returnId, request: request([interest]), packet: packet([{ slotKey: interest, amountCents: '700' }], { providerKind: 'manual', sourceVersion: 'manual@int', consumedSlices: [slice('t:5')] }) });
   await assert.rejects(substituteProvider(pool, { ...S, returnId, from: { providerKind: 'asset_register', sourceVersion: 'register@v1' }, retire: [a1, a2, s179], request: request([a1, a2, s179]),
     packet: { ...assets, sourceVersion: 'register@v2', consumedSlices: [slice('t:1'), slice('t:5')] }, reviewedBy: 'tester', reconciliation }), /slice .*t:5.* is already consumed/);
 });

@@ -11,6 +11,9 @@ import { settingsKey } from '../../lib/secrets.js';
 import { companySettingsPage, companyToValues, companyFormValues } from '../../lib/views/settings.js';
 import { usersPage, usersBody, userFormBody, userToValues, userFormValues, NEW_USER_VALUES, inviteSentBody, inviteSetupPage } from '../../lib/views/users.js';
 import { publicMessage } from '../../lib/views/vendor-auto.js';
+import { withTransaction } from '../../lib/db.js';
+import { getProfile, saveProfileIn, suggestReturnType } from '../../lib/tax/periods.js';
+import { profileValues, profileFromForm, profileFields } from '../../lib/views/tax-profile-fields.js';
 
 export const COMPANY_UPLOAD_PATH = /^\/settings\/company\/logo$/;
 
@@ -30,17 +33,29 @@ export async function userRoutes(h) {
   // ---- company ----
   if (path === '/settings/company' || path.startsWith('/settings/company/')) {
     const company = await getCompany(pool, scope);
+    // One company record (Tax Books T2, owner request 2026-10-16): the Tax section reads and writes the same tax_profile as
+    // /tax/:entity/profile through lib/tax/periods.js, so either place changes both and the reviewed-change rule applies in both. While
+    // the company has no tax setup, the return its business type suggests is shown; it is never saved unless a person chooses it.
+    const profile = await getProfile(pool, scope);
+    const notSetUp = profile.exists === false || profile.return_type === 'none';
     const show = (more = {}, status = 200) =>
-      page(companySettingsPage({ ...base(), company, hasKey: Boolean(key()), v: more.v ?? companyToValues(company), ...more }), status);
+      page(companySettingsPage({ ...base(), company, hasKey: Boolean(key()), v: more.v ?? companyToValues(company), tax: more.tax ?? profileValues(profile),
+        suggestion: notSetUp ? suggestReturnType(company.business_type) : null, ...more }), status);
     if (path === '/settings/company' && req.method === 'GET') { show({ flash: takeFlash() }); return true; }
     if (path === '/settings/company' && req.method === 'POST') {
-      const v = companyFormValues(form);
+      const v = companyFormValues(form), t = profileFromForm(form);
+      // A post without the Tax section leaves the tax setup alone, and so does "No return" on a company that was never set up.
+      const saveTax = form.has('return_type') && !(notSetUp && ['', 'none'].includes(t.returnType));
       try {
-        await saveCompany(pool, { ...scope, fields: v, env });
+        // One transaction: a refused tax change (no reason, a bad code) saves nothing, not even the company details.
+        await withTransaction(pool, async tx => {
+          await saveCompany(tx, { ...scope, fields: v, env });
+          if (saveTax) await saveProfileIn(tx, { ...scope, fields: profileFields(t, profile.accountant_may_edit !== false), reason: t.reason, actor });
+        });
         go('/settings/company', 'ok', 'Company details saved.');
       } catch (error) {
         if (!(error instanceof ValidationError)) throw error;
-        show({ v: { ...v, ein: '' }, error: error.message }, 422);
+        show({ v: { ...v, ein: '' }, tax: t, error: error.message }, 422);
       }
       return true;
     }

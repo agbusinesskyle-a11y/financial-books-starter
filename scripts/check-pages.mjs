@@ -19,12 +19,23 @@ const paths = process.argv[3] ? readFileSync(process.argv[3], 'utf8').split(/\r?
   ...REPORTS.map(r => `/reports/r/${r.key}`),
   ...REPORTS.filter(r => ['period', 'cashflow'].includes(r.kind)).map(r => `/reports/r/${r.key}?run=1&period=this_year_to_date&columns=months&cmp_py=1&chg=1`),
 ];
-// Tax Books (T1): /tax and each company's tax setup page, taken from the home page's links (company ids differ per database).
+// Tax Books (T1, T2): /tax (the current company's tax page), All returns and the party directory (org admins), each company's tax
+// setup page, each period's mapping page (needs-attention and all accounts) and one account editor on it with its lines, taken from the
+// pages' own links (company ids differ per database).
 if (!process.argv[3]) {
-  paths.push('/tax');
+  paths.push('/tax', '/tax/all', '/tax/parties');
   try {
-    const home = await (await fetch(base + '/tax')).text();
-    paths.push(...new Set([...home.matchAll(/href="(\/tax\/\d+\/profile)"/g)].map(m => m[1])));
+    const home = await (await fetch(base + '/tax/all')).text();
+    const profiles = [...new Set([...home.matchAll(/href="(\/tax\/\d+\/profile)"/g)].map(m => m[1]))];
+    paths.push(...profiles);
+    for (const p of profiles) {
+      const profile = await (await fetch(base + p)).text();
+      for (const mapping of new Set([...profile.matchAll(/href="(\/tax\/\d+\/\d{4}\/mapping)"/g)].map(m => m[1]))) {
+        paths.push(mapping, `${mapping}?show=all`);
+        const editor = /href="(\/tax\/\d+\/\d{4}\/mapping\?source=\d+&amp;account=\d+)/.exec(await (await fetch(`${base}${mapping}?show=all`)).text());
+        if (editor) { const e = editor[1].replaceAll('&amp;', '&'); paths.push(e, `${e}&lines=1`); }
+      }
+    }
   } catch { /* the app isn't up: the check below reports it */ }
 }
 
