@@ -415,3 +415,78 @@ test('ported: imported tax baselines are something a demo never has, and the bas
     assert.equal(await n('SELECT count(*) AS n FROM tax_baseline'), 0);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+// ---- Tax Books T2, ported: the party directory and EIN settlement, "Accept all sure", the reconcile CLI, the reset ----
+
+test('ported T2: the party directory and settling an EIN conflict are closed in the demo; the mapping AI routes are closed too', async () => {
+  const v = await visitor(base).start();
+  const { entity_id: company } = await one('SELECT entity_id FROM entity ORDER BY entity_id LIMIT 1');
+  for (const [path, body, why] of [
+    ['/tax/parties', [['kind', 'individual'], ['name', 'Visitor Person'], ['tax_id', '123-45-6789']], /Tax parties and tax ids is turned off/],
+    [`/tax/${company}/parties/1/ein`, [['evidence_id', '1'], ['keep', 'party']], /Tax parties and tax ids is turned off/],
+    [`/tax/${company}/2026/mapping/ai`, [], /AI help is turned off/],
+    [`/tax/${company}/2026/mapping/ai-accept`, [], /AI help is turned off/],
+    [`/tax/${company}/2026/mapping/ai-reject`, [], /AI help is turned off/],
+  ]) {
+    const res = await v.post(path, body);
+    assert.equal(res.status, 403, path);
+    assert.match(await res.text(), why, path);
+  }
+  assert.equal((await v.get(`/tax/${company}/2026/mapping/ai`)).status, 403, 'the AI routes are closed for reading too');
+  assert.equal(await n('SELECT count(*) AS n FROM tax_party'), 0);
+  assert.equal(await n('SELECT count(*) AS n FROM tax_party_tax_id_evidence'), 0);
+  assert.equal(await n('SELECT count(*) AS n FROM entity WHERE ein_enc IS NOT NULL'), 0);
+  // Reading the directory stays open, and so do a company's owners and its mapping actions.
+  assert.equal((await v.get('/tax/parties')).status, 200);
+  for (const p of [`/tax/${company}/interests`, `/tax/${company}/2026/mapping/bind`, `/tax/${company}/2026/mapping/accept-sure`]) assert.equal(demoBlock('POST', p), null, p);
+});
+
+test('ported T2: "Accept all sure" takes at most a batch’s worth of suggestions in the demo', async () => {
+  const v = await visitor(base).start();
+  const { entity_id: company } = await one('SELECT entity_id FROM entity ORDER BY entity_id LIMIT 1');
+  const sure = k => Array.from({ length: k }, (_, i) => ['sure', `decision-${i}`]);
+  const res = await v.post(`/tax/${company}/2026/mapping/accept-sure`, sure(DEMO_BATCH_MAX + 1));
+  assert.equal(res.status, 403);
+  assert.match(await res.text(), new RegExp(`at most ${DEMO_BATCH_MAX} at a time`));
+  assert.notEqual((await v.post(`/tax/${company}/2026/mapping/accept-sure`, sure(DEMO_BATCH_MAX))).status, 403, 'a full batch reaches the page (no period here)');
+});
+
+test('ported T2: the own-company EIN reconcile refuses the demo, with DEMO_MODE=1 or on a demo database', async () => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const envOf = more => ({ PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, DATABASE_URL: db.url, ALLOW_SUPERUSER: '1', ...more });
+  const run = more => promisify(execFile)(process.execPath, ['scripts/tax-reconcile-own-tax-ids.mjs', 'sample'], { env: envOf(more) });
+  await assert.rejects(run({ DEMO_MODE: '1' }), e => e.code === 1 && /doesn’t run with DEMO_MODE=1/.test(e.stderr));
+  await assert.rejects(run({}), e => e.code === 1 && /public demo/.test(e.stderr));
+  assert.equal(await n('SELECT count(*) AS n FROM tax_party WHERE own_tax_id_state IS NOT NULL'), 0);
+  assert.equal(await n('SELECT count(*) AS n FROM entity WHERE ein_enc IS NOT NULL'), 0);
+});
+
+test('ported T2: the nightly reset empties every table migration 065 makes', async () => {
+  const t2Tables = ['ownership_interest', 'tax_binding_default', 'tax_binding', 'tax_binding_line', 'tax_binding_suggestion', 'tax_party_tax_id_evidence'];
+  const known = await appTables();
+  for (const t of t2Tables) assert.ok(known.has(t), `${t} is one of the app's tables`);
+  const other = await freshDb();
+  try {
+    await resetDemo(other.pool, { env: { DEMO_MODE: '1' }, asOf: AS_OF });
+    const { org_id: orgId, entity_id: entityId } = (await other.pool.query('SELECT org_id, entity_id FROM entity ORDER BY entity_id LIMIT 1')).rows[0];
+    const scope = { orgId: Number(orgId), entityId: Number(entityId) };
+    const { saveProfile, openPeriod } = await import('../lib/tax/periods.js');
+    const { saveParty } = await import('../lib/tax/parties.js');
+    const { saveInterest } = await import('../lib/tax/ownership.js');
+    const { saveBindings } = await import('../lib/tax/bindings.js');
+    await saveProfile(other.pool, { ...scope, fields: { returnType: 'form_1065', taxMethodDefault: 'cash', bookBasisDefault: 'accrual', yearEndMonth: 12 }, reason: 'setup', actor: 'tester' });
+    const returnId = Number(await openPeriod(other.pool, { ...scope, year: 2025, actor: 'tester' }));
+    const partyId = Number(await saveParty(other.pool, { orgId: scope.orgId, fields: { kind: 'individual', name: 'Pat Sample', taxId: '' }, env: {} }));
+    await saveInterest(other.pool, { ...scope, fields: { partyId, role: 'general_partner', from: '2025-01-01', profit: '1/1', loss: '1/1', capital: '1/1' }, actor: 'tester' });
+    const { account_id: accountId } = (await other.pool.query(`SELECT account_id FROM account WHERE org_id = $1 AND entity_id = $2 AND type = 'expense' ORDER BY account_id LIMIT 1`, [orgId, entityId])).rows[0];
+    await saveBindings(other.pool, { ...scope, returnId, sourceEntityId: scope.entityId, accountId: Number(accountId), measurement: 'activity', makeDefault: true, actor: 'tester',
+      rows: [{ treatment: 'statement_row', destination: 'f1065.p1.21', rowLabel: 'Sample costs' }] });
+    const counts = async () => Object.fromEntries(await Promise.all(t2Tables.map(async t => [t, Number((await other.pool.query(`SELECT count(*) AS n FROM ${t}`)).rows[0].n)])));
+    const was = await counts();
+    assert.ok(was.ownership_interest > 0 && was.tax_binding > 0 && was.tax_binding_default > 0, JSON.stringify(was));
+    assert.deepEqual(await demoProblems(other.pool), [], 'a visitor’s T2 work is still a clean demo');
+    await resetDemo(other.pool, { env: { DEMO_MODE: '1' }, asOf: AS_OF });
+    assert.deepEqual(await counts(), Object.fromEntries(t2Tables.map(t => [t, 0])));
+  } finally { await other.drop(); }
+});

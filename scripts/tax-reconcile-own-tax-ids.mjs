@@ -4,6 +4,7 @@
 // Usage: DATABASE_URL=... SETTINGS_KEY=... node scripts/tax-reconcile-own-tax-ids.mjs <org slug>
 import { createPool } from '../lib/db.js';
 import { reconcileOwnCompanyTaxIds } from '../lib/tax/parties.js';
+import { refuseDemoDatabase } from '../lib/data/demo.js';
 
 const [slug] = process.argv.slice(2);
 if (!slug) {
@@ -12,6 +13,8 @@ if (!slug) {
 }
 const pool = createPool();
 try {
+  // Tax ids never go into the public demo (DEMO_MODE=1, or a database demo-reset made): this moves and compares them.
+  await refuseDemoDatabase(pool);
   const { rows: [org] } = await pool.query('SELECT org_id FROM org WHERE slug = $1', [slug]);
   if (!org) throw new Error(`no org ${slug}`);
   const r = await reconcileOwnCompanyTaxIds(pool, { orgId: org.org_id, env: process.env });
