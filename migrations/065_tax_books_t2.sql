@@ -50,7 +50,7 @@ $$;
 -- §4.8 Owners and members of a company, per period (pulled forward from T4 at the owner's request, 2026-10-16): who holds an interest,
 -- in what role, from when to when, and the exact profit, loss and capital fractions (numerator / denominator; NULL = not known yet,
 -- which blocks what depends on it and is never zero). History is kept like household members: a change closes the earlier row the day
--- before and adds a new one; nothing is deleted. Capital accounts, basis, liabilities, allocations and K-1s stay T4 (migration 065), which
+-- before and adds a new one; nothing is deleted. Capital accounts, basis, liabilities, allocations and K-1s stay T4 (migration 067), which
 -- builds on these rows. A binding's interest_id points here.
 CREATE TABLE ownership_interest (
   org_id bigint NOT NULL REFERENCES org (org_id),
@@ -235,7 +235,7 @@ CREATE TABLE tax_binding (
   interest_id bigint,          -- the period's ownership interest (ownership_interest, above)
   interest_version text,       -- the selected interest's version when resolved (lib/tax/references.js: T2 selects from ownership_interest)
   k1_issuer_party_id bigint,
-  k1_source_id bigint,         -- the K-1 record selected; its FK arrives in T4 (065) with k1_record
+  k1_source_id bigint,         -- the K-1 record selected; its FK arrives in T4 (067) with k1_record
   k1_source_version text,
   -- The canonical slot key (lib/tax/providers.js) when the treatment names a slot and every dimension the line requires is resolved.
   slot_key text CHECK (length(slot_key) BETWEEN 3 AND 400),
@@ -278,7 +278,7 @@ CREATE INDEX tax_binding_source ON tax_binding (org_id, return_id, source_entity
 -- §4.5 Line attribution: one posting line (txn, line) of an account's period activity routed to its own target (mixed accounts,
 -- owner-specific movements). Lines are consumed first; the account's set takes the residual (lib/tax/partition.js). A line is
 -- attributed at most once per return. No FK to txn: an edited or deleted transaction makes the attribution stale or orphaned, never
--- blocked. txn_version (migration 053's txn_version()) is the transaction as the person saw it; any later change makes it stale.
+-- blocked. txn_version (migration 055's txn_version()) is the transaction as the person saw it; any later change makes it stale.
 CREATE TABLE tax_binding_line (
   org_id bigint NOT NULL REFERENCES org (org_id),
   binding_line_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
