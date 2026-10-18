@@ -12,6 +12,7 @@ import { inclusionSources } from '../../lib/tax/bindings.js';
 import { reportingChain } from '../../lib/tax/reporting.js';
 import { mappingRoutes } from './tax-mapping-routes.js';
 import { isDemo, DEMO_BATCH_MAX } from '../../lib/domain/demo.js';
+import { worksheetRoutes, WORKSHEET_PATH } from './tax-worksheet-routes.js';
 
 // Tax Books T1 (spec §8): /tax and /tax/:entity/profile (+ parties, activities, periods, inclusions). The company in the path
 // must be one the person may open; the accountant's edit right is the company flag accountant_may_edit.
@@ -53,6 +54,9 @@ export async function taxRoutes(h) {
   // T2 (spec §8): one period's mapping page, /tax/:entity/:year/mapping, and its POSTs (the AI actions arrive with Task 14).
   const mm = /^\/tax\/(\d{1,18})\/(\d{4})\/mapping(?:\/(bind|clear|line|unline|accept|accept-sure|copy-forward|ai|ai-accept|ai-reject))?$/.exec(path);
   if (mm) return mappingRoutes(h, { company: companyOf(mm[1]), year: Number(mm[2]), action: mm[3] ?? null });
+  // T3 (spec §8): the return's worksheet /tax/:entity/:year and its workpapers (typed items, adjustments, cash and closings, COGS), revisions.
+  const mw = WORKSHEET_PATH.exec(path);
+  if (mw) return worksheetRoutes(h, { company: companyOf(mw[1]), year: Number(mw[2]), section: mw[3] ?? null, action: mw[4] ?? null });
   // /tax/:entity/periods/:return/initial verifies a requested first year (admin only: roles.js and the check below).
   const mi = /^\/tax\/(\d{1,18})\/periods\/(\d{1,18})\/initial$/.exec(path);
   // T2 (Codex t2-plan-r2 B9): /tax/:entity/parties/:party/ein settles an EIN conflict of one of our companies (org admins: roles.js ADMIN_ONLY

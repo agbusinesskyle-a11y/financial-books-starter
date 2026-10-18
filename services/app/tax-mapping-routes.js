@@ -72,7 +72,7 @@ export async function mappingRoutes(h, { company, year, action }) {
     if (accountId) {
       const s = cov.sources.find(x => x.entityId === Number(sourceId) && x.allowed && x.status === 'measured') ?? (() => { throw new HttpError(404, 'Company not found'); })();
       const a = s.accounts.find(x => x.accountId === Number(accountId)) ?? (() => { throw new HttpError(404, 'Account not found'); })();
-      const live = lines ? (await measureLines(pool, { orgId, sourceEntityId: s.entityId, accountIds: [a.accountId], periodStart: cov.ret.period_start, periodEnd: cov.ret.period_end })).get(a.accountId) ?? [] : null;
+      const live = lines ? (await measureLines(pool, { orgId, sourceEntityId: s.entityId, accountIds: [a.accountId], periodStart: cov.ret.period_start, periodEnd: cov.ret.period_end, returnId })).get(a.accountId) ?? [] : null;
       focus = { source: s, account: a, lines: live, from };
     }
     const [suggestions, parties, activities] = await Promise.all([suggestionsFor(pool, { orgId, cov, companyIds }), nameable(), listActivities(pool, scope)]);

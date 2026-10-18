@@ -502,11 +502,11 @@ test('publication checks the current, PERMITTED mapping (Codex r4 R4-N1): an end
   await substituteProviders(pool, { ...Y, returnId: yRet, reviewedBy: 'tester', replacements: [
     { from: { providerKind: 'books', sourceVersion: 'books@a' }, retire: [slots.books], request: request([slots.books]), packet: manual, reconciliation: recOf(slots.books, '5000') },
     { from: { providerKind: 'cogs_workpaper', sourceVersion: 'cogs_workpaper@a' }, retire: [cogsSlot], request: request([cogsSlot]), packet: b.cogs_workpaper, reconciliation: recOf(cogsSlot, '5000') }] });
-  // 3. A partition on another measurement basis is T3's to publish (R4-N4): proved, but refused at the boundary in T2.
+  // 3. A partition on another measurement basis than the return's current one (R4-N4; T3 supplies the current basis): proved, but refused.
   await pool.query('DELETE FROM tax_provider_assignment WHERE org_id = $1 AND return_id = $2', [orgId, yRet]);
   const n = await packetsFor(Y, yRet, wages, slots, 'n', 'unreviewed', { normalization: 'closings_removed:sample' });
   assert.equal(n.books.sourceRefs[0].normalization, 'closings_removed:sample');
-  await assert.rejects(assignPacket(pool, { ...Y, returnId: yRet, request: request([slots.books]), packet: n.books }), /published by stage T3/);
+  await assert.rejects(assignPacket(pool, { ...Y, returnId: yRet, request: request([slots.books]), packet: n.books }), /rebuild it from the current measurement/);
 });
 
 test('publication holds the included books it reads (Codex r4 R4-N1): a child journal entry in flight is waited for, and its new figures refuse the stale packet', async () => {

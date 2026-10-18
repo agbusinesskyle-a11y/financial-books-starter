@@ -400,9 +400,8 @@ test('ported: imported tax baselines are something a demo never has, and the bas
   const { execFile } = await import('node:child_process');
   const { promisify } = await import('node:util');
   const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
-  const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
-  const dir = await mkdtemp(join(tmpdir(), 'fb-demo-baseline-'));
+  const dir = await mkdtemp(join(import.meta.dirname, 'fb-demo-baseline-'));
   try {
     const file = join(dir, 'payload.json');
     await writeFile(file, '{"facts":[]}');
@@ -668,4 +667,174 @@ test('r1 note 3: the reset empties line attributions and suggestions too, and re
     await assert.rejects(resetDemo(other.pool, { env: { DEMO_MODE: '1' }, asOf: AS_OF }), /holds things a demo never makes[^]*tax_party_tax_id_evidence/);
     assert.equal(await q('SELECT count(*) AS n FROM tax_party_tax_id_evidence'), 1, 'nothing was wiped');
   } finally { await other.drop(); }
+});
+
+// ---- Tax Books T3: whole-return work, bulk typed answers, and the comparison CLI ----
+
+test('ported T3: every worksheet page and POST takes a heavy-work slot before computing or writing', async t => {
+  const { other, scope, base: b } = await taxDemo();
+  try {
+    const { openPeriod } = await import('../lib/tax/periods.js');
+    const { computeReturn } = await import('../lib/tax/engine/compute.js');
+    const { acct, activity, bind, bill, expense, importedJe } = await import('./tax-t3-fixtures.js');
+    const { default: pg } = await import('pg');
+    const p = other.pool;
+    const returnId = Number(await openPeriod(p, { ...scope, year: 2025, actor: 'tester' }));
+    const act = await activity(p, scope, { name: 'Demo shop' });
+    const bank = await acct(p, scope, 'Demo bank', 'bank');
+    const cost = await acct(p, scope, 'Demo supplies', 'expense');
+    const stock = await acct(p, scope, 'Demo inventory', 'other_current_asset');
+    const income = await acct(p, scope, 'Demo sales', 'income');
+    const equity = await acct(p, scope, 'Demo equity', 'equity');
+    const meals = await newAccounts(p, scope, 'Demo meals', 'expense', 2);
+    await expense(p, scope, '2025-06-01', bank, meals.map(id => [id, 2000]));
+    for (const id of meals) await bind(p, scope, returnId, id, 'activity', [{ treatment: 'statement_row', destination: 'f1065.p1.21', rowLabel: `Sample meals ${id}` }]);
+    const billId = await bill(p, scope, '2025-12-20', [[cost, 6000]]);
+    const movementId = await bill(p, scope, '2025-06-01', [[stock, 5000]]);
+    const closingId = await importedJe(p, scope, '2025-12-31', [[income, 1000], [equity, -1000]], { doc: 'CJE-DEMO' });
+    const row = async (sql, args = []) => (await p.query(sql, args)).rows[0];
+    const version = async id => (await row('SELECT txn_version($1) AS v', [id])).v;
+    const r = await computeReturn(p, { ...scope, returnId });
+    const proposals = r.proposals.filter(x => x.accountName.startsWith('Demo meals '));
+    assert.equal(proposals.length, 2, 'real, unanswered proposals for accept and reject');
+    const keys = r.needs.filter(x => x.key !== 'answer:k1_inflows').slice(0, DEMO_BATCH_MAX).map(x => ['key', x.key]);
+    assert.equal(keys.length, DEMO_BATCH_MAX, 'a real full manual/rest batch');
+
+    const none = await startDemo({ pool: p, demoHeavyAtOnce: 0 });
+    const blocked = await visitor(none).start(), allowed = await visitor(b).start();
+    assert.ok(blocked.csrf && allowed.csrf, 'authenticated visitors with genuine CSRF tokens');
+    const path = `/tax/${scope.entityId}/2025`;
+    let observed = null;
+    const query = pg.Client.prototype.query;
+    // All pool and transaction queries pass here, including computeIn under answerProposal's write locks.
+    // Count the engine's first query and any DML attempt, even one subsequently rolled back.
+    t.mock.method(pg.Client.prototype, 'query', function (sql, ...args) {
+      const text = typeof sql === 'string' ? sql : sql.text;
+      if (observed) {
+        if (/^SELECT r\.return_id, r\.entity_id, r\.status, r\.return_type\b/.test(text)) observed.computations++;
+        if (/\b(?:INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|TRUNCATE)\b/i.test(text)) observed.writes++;
+      }
+      return query.call(this, sql, ...args);
+    });
+    const request = async (v, method, suffix, body) => {
+      observed = { computations: 0, writes: 0 };
+      try {
+        const res = method === 'GET' ? await v.get(path + suffix) : await v.post(path + suffix, body);
+        const text = await res.text();
+        return { status: res.status, ...observed, text };
+      } finally { observed = null; }
+    };
+    const refuse = async (method, suffix, body, label = '') => {
+      let response;
+      await t.test(`${method} ${suffix || '/'} ${label}`.trim(), async () => {
+        response = await request(blocked, method, suffix, body);
+        const { text, ...result } = response;
+        assert.deepEqual(result, { status: 503, computations: 0, writes: 0 });
+        assert.match(text, /busy building other reports/);
+      });
+      return response;
+    };
+    for (const suffix of ['', '/manual', '/adjustments', '/cash', '/cogs']) await refuse('GET', suffix);
+    // A positive control proves the counter observes an actual whole-return computation.
+    const page = await request(allowed, 'GET', '/manual');
+    assert.equal(page.status, 200);
+    assert.equal(page.computations, 1);
+
+    // Successful controls seed the rows needed by clear/withdraw/unclassify. Each valid form is first sent to the
+    // zero-capacity app; invalid forms also cover the ValidationError -> show() -> computeReturn path.
+    const cases = [
+      ['/manual/save', { item_key: 'answer:k1_inflows', status: 'not_applicable' }],
+      ['/manual/clear', { item_key: 'answer:k1_inflows' }],
+      ['/manual/rest', keys, [['key', 'missing-item']], 303], // unknown keys are ignored by this action
+      ['/adjustments/add', { purpose: 'other', memo: 'Sample correction', evidence: 'Sample workpaper', slot_0: 'f1065.p1.16a|activity', amount_0: '5.00', class_0: 'other' }],
+      ['/adjustments/withdraw', async () => ({ group_id: (await row("SELECT group_id FROM tax_adjustment_group WHERE source = 'person' AND status = 'accepted' ORDER BY group_id LIMIT 1")).group_id, reason: 'Sample correction withdrawn' })],
+      ['/adjustments/answer', { key: proposals[0].key, version: proposals[0].version, decision: 'accept' }, { key: 'missing-proposal', version: 'missing', decision: 'accept' }],
+      ['/adjustments/answer', { key: proposals[1].key, version: proposals[1].version, decision: 'reject', reason: 'Sample review' }, { key: proposals[1].key, version: 'stale', decision: 'reject', reason: 'Sample review' }],
+      ['/cash/review', { txn_id: billId, kind: 'related_party_accrual', decision: 'exclude', reason: 'Sample unpaid accrual' }],
+      ['/cash/clear', async () => ({ review_id: (await row('SELECT review_id FROM cash_timing_review WHERE txn_id = $1', [billId])).review_id })],
+      ['/cash/classify', { txn_id: closingId, txn_version: await version(closingId), class: 'closing', line: '1' }, null],
+      ['/cash/unclassify', { txn_id: closingId }],
+      ['/cogs/save', { activity_id: act, path: 'reconstruct', treatment: 'inventory_as_booked', method: 'cost', begin: '0.00', end: '50.00' }],
+      ['/cogs/movement', { account_id: stock, txn_id: movementId, line_no: '1', txn_version: await version(movementId), class: 'purchase' }],
+      ['/cogs/unclassify', { account_id: stock, txn_id: movementId, line_no: '1' }],
+      ['/revisions', {}, { unexpected: 'ignored' }, 303], // revisions take no form fields
+    ];
+    for (const [suffix, valid, invalid = {}, invalidStatus = 422] of cases) {
+      let body = typeof valid === 'function' ? await valid() : valid;
+      if (suffix === '/cash/classify') body = [...Object.entries(body), ['line', '2']];
+      await refuse('POST', suffix, invalid ?? {}, 'invalid form');
+      const denied = await refuse('POST', suffix, body, `valid form${suffix === '/adjustments/answer' ? ` (${body.decision})` : ''}`);
+      const bad = await request(allowed, 'POST', suffix, invalid ?? {});
+      assert.equal(bad.status, invalidStatus, `${suffix} invalid control`);
+      if (invalidStatus === 422) assert.ok(bad.computations >= 1, `${suffix} validation renders the whole return`);
+      // During a failing regression run a bypass may already have consumed a clear/answer form.
+      const ok = denied.status === 503 ? await request(allowed, 'POST', suffix, body) : denied;
+      assert.equal(ok.status, 303, `${suffix} valid control: ${ok.text}`);
+      assert.ok(ok.writes > 0, `${suffix} control proves a write was prevented`);
+    }
+    // Rejecting with no reason and an invalid decision also reach validation, while an oversized batch must be
+    // admitted before even the existing bulk check (that cap is exercised with available capacity below).
+    await refuse('POST', '/adjustments/answer', { decision: 'reject' }, 'missing rejection reason');
+    await refuse('POST', '/adjustments/answer', { decision: 'invalid' }, 'invalid decision');
+    await refuse('POST', '/manual/rest', [...keys, ['key', 'extra-item']], 'oversized batch');
+    assert.equal((await blocked.get(`/tax/${scope.entityId}/profile`)).status, 200, 'tax setup stays available');
+  } finally { await other.drop(); }
+});
+
+test('ported T3: remaining typed items take at most a demo batch, the rendered batch succeeds, and reset clears the T3 work', async () => {
+  const { other, scope, q, base: b } = await taxDemo();
+  try {
+    const { openPeriod } = await import('../lib/tax/periods.js');
+    const { computeReturn } = await import('../lib/tax/engine/compute.js');
+    const { K1_ANSWER } = await import('../lib/tax/manual.js');
+    const returnId = Number(await openPeriod(other.pool, { ...scope, year: 2025, actor: 'tester' }));
+    const r = await computeReturn(other.pool, { ...scope, returnId });
+    const keys = r.needs.filter(n => n.key !== K1_ANSWER).map(n => n.key);
+    assert.ok(keys.length > DEMO_BATCH_MAX, `${keys.length} real typed items`);
+    const v = await visitor(b).start(), path = `/tax/${scope.entityId}/2025`;
+    const page = await v.get(`${path}/manual`);
+    assert.equal(page.status, 200);
+    const shown = [...(await page.text()).matchAll(/name="key" value="([^"]+)"/g)].map(m => m[1].replaceAll('&amp;', '&'));
+    assert.deepEqual(shown, keys.slice(0, DEMO_BATCH_MAX), 'the page offers the first batch in order');
+    const postings = await q('SELECT count(*) AS n FROM posting');
+    const over = await v.post(`${path}/manual/rest`, keys.slice(0, DEMO_BATCH_MAX + 1).map(k => ['key', k]));
+    assert.equal(over.status, 403);
+    assert.match(await over.text(), new RegExp(`at most ${DEMO_BATCH_MAX} at a time`));
+    assert.equal(await q('SELECT count(*) AS n FROM tax_manual_item'), 0, 'an oversized request writes nothing');
+    const ok = await v.post(`${path}/manual/rest`, shown.map(k => ['key', k]));
+    assert.equal(ok.status, 303);
+    assert.match(await flashAfter(v, ok), new RegExp(`${DEMO_BATCH_MAX} items marked not applicable`));
+    assert.equal(await q('SELECT count(*) AS n FROM tax_manual_item'), DEMO_BATCH_MAX);
+    assert.equal((await v.post(`${path}/manual/rest`, keys.slice(DEMO_BATCH_MAX).map(k => ['key', k]))).status, 303);
+    assert.equal(await q('SELECT count(*) AS n FROM tax_manual_item'), keys.length);
+    assert.equal(await q('SELECT count(*) AS n FROM tax_manual_item WHERE item_key = $1', [K1_ANSWER]), 0, 'the K-1 answer remains explicit');
+    for (const suffix of ['', '/adjustments', '/cash', '/cogs']) assert.equal((await v.get(path + suffix)).status, 200, suffix || 'worksheet');
+    assert.equal((await v.post(`${path}/revisions`)).status, 303);
+    assert.equal(await q('SELECT count(*) AS n FROM tax_return_revision'), 1);
+    assert.equal(await q('SELECT count(*) AS n FROM posting'), postings, 'the ledger is untouched');
+    assert.deepEqual(await demoProblems(other.pool), []);
+    const tables = ['tax_return_revision', 'book_entry_classification', 'cash_timing_review', 'tax_manual_item',
+      'tax_adjustment_group', 'tax_adjustment', 'tax_cogs_workpaper', 'tax_cogs_movement'];
+    const known = await appTables();
+    for (const table of tables) assert.ok(known.has(table), `${table} is a resettable app table`);
+    await resetDemo(other.pool, { env: { DEMO_MODE: '1' }, asOf: AS_OF });
+    for (const table of tables) assert.equal(await q(`SELECT count(*) AS n FROM ${table}`), 0, table);
+  } finally { await other.drop(); }
+});
+
+test('ported T3: the baseline comparison refuses demo mode and a demo database before reading books or files', async () => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const { existsSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { randomUUID } = await import('node:crypto');
+  // These paths are never created. An absent organization and resolver must not be read before the demo refusal.
+  const dir = join(tmpdir(), `fb-demo-compare-${randomUUID()}`), out = join(dir, 'comparison.json');
+  const envOf = more => ({ PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, DATABASE_URL: db.url, ALLOW_SUPERUSER: '1', ...more });
+  const run = more => promisify(execFile)(process.execPath, ['scripts/tax-compare-baseline.mjs', '--org', 'missing-comparison-org', '--entity', '1',
+    '--year', '2025', '--out', out, '--resolve', join(dir, 'resolve.json')], { env: envOf(more) });
+  await assert.rejects(run({ DEMO_MODE: '1' }), e => e.code === 1 && /doesn’t run with DEMO_MODE=1/.test(e.stderr));
+  await assert.rejects(run({}), e => e.code === 1 && /public demo/.test(e.stderr));
+  assert.equal(existsSync(dir), false, 'no comparison output was created');
 });

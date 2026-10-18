@@ -19,9 +19,10 @@ const paths = process.argv[3] ? readFileSync(process.argv[3], 'utf8').split(/\r?
   ...REPORTS.map(r => `/reports/r/${r.key}`),
   ...REPORTS.filter(r => ['period', 'cashflow'].includes(r.kind)).map(r => `/reports/r/${r.key}?run=1&period=this_year_to_date&columns=months&cmp_py=1&chg=1`),
 ];
-// Tax Books (T1, T2): /tax (the current company's tax page), All returns and the party directory (org admins), each company's tax
-// setup page, each period's mapping page (needs-attention and all accounts) and one account editor on it with its lines, taken from the
-// pages' own links (company ids differ per database).
+// Tax Books (T1, T2, T3): /tax (the current company's tax page), All returns and the party directory (org admins), each company's tax
+// setup page, each period's mapping page (needs-attention and all accounts) and one account editor on it with its lines, each period's
+// worksheet with its workpapers (typed items, adjustments, cash and closings, COGS) and one line's drill-down, taken from the pages' own
+// links (company ids differ per database).
 if (!process.argv[3]) {
   paths.push('/tax', '/tax/all', '/tax/parties');
   try {
@@ -34,6 +35,11 @@ if (!process.argv[3]) {
         paths.push(mapping, `${mapping}?show=all`);
         const editor = /href="(\/tax\/\d+\/\d{4}\/mapping\?source=\d+&amp;account=\d+)/.exec(await (await fetch(`${base}${mapping}?show=all`)).text());
         if (editor) { const e = editor[1].replaceAll('&amp;', '&'); paths.push(e, `${e}&lines=1`); }
+      }
+      for (const sheet of new Set([...profile.matchAll(/href="(\/tax\/\d+\/\d{4})"/g)].map(m => m[1]))) {
+        paths.push(sheet, ...['manual', 'adjustments', 'cash', 'cogs'].map(s => `${sheet}/${s}`));
+        const drill = /href="(\/tax\/\d+\/\d{4}\?line=[^"#]+)/.exec(await (await fetch(base + sheet)).text());
+        if (drill) paths.push(drill[1].replaceAll('&amp;', '&'));
       }
     }
   } catch { /* the app isn't up: the check below reports it */ }

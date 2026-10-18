@@ -23,6 +23,7 @@ A migration's file name is what `schema_migrations` records, so never rename a m
 | `061_loans.sql` | `063_loans.sql` | The Loans page |
 | `062_tax_books_t1.sql` | `064_tax_books_t1.sql` | Tax Books T1 (contracts) |
 | `063_tax_books_t2.sql` | `065_tax_books_t2.sql` | Tax Books T2 (bindings, coverage, suggestions, owners and members) |
+| `064_tax_books_t3.sql` | `066_tax_books_t3.sql` | Tax Books T3 (standalone engine) |
 
 Tests named for a migration follow the starter's number: the private app's `test/migration-053.test.js` is
 `test/migration-055.test.js` here.
