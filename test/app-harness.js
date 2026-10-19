@@ -8,14 +8,16 @@ import { createApp } from '../services/app/index.js';
 import { makeTotp } from '../lib/auth.js';
 
 // A running app over a seeded throwaway database, plus a signed-in HTTP client.
-export async function startApp({ asOf = '2026-10-12', now = new Date('2026-10-12T17:00:00Z'), mailer, env: moreEnv = {}, makeTransport, ledgerline = null, aiFetch, smsFetch } = {}) {
+export async function startApp({ asOf = '2026-10-12', now = new Date('2026-10-12T17:00:00Z'), mailer, env: moreEnv = {}, makeTransport, ledgerline = null, aiFetch, smsFetch, userRoutesTestHooks = {}, morningTestHooks = {}, onAuthenticatedForTest, morningRuntime, seed } = {}) {
   const password = 'test password';
   const totpSecret = new OTPAuth.Secret({ size: 20 }).base32;
   const env = { APP_LOGIN_PASSWORD_HASH: bcrypt.hashSync(password, 4), APP_TOTP_SECRET: totpSecret, ...moreEnv };
   const db = await freshDb();
-  const ids = await writeSample(db.pool, generateSample({ asOf }));
+  const ids = seed ? await seed(db.pool) : await writeSample(db.pool, generateSample({ asOf }));
   let clock = now.getTime();
-  const server = http.createServer(createApp({ pool: db.pool, env, now: () => new Date(clock), ...(mailer ? { mailer } : {}), makeTransport, ledgerline, aiFetch, smsFetch }));
+  const sessions = new Map();
+  const server = http.createServer(createApp({ pool: db.pool, env, now: () => new Date(clock), ...(mailer ? { mailer } : {}), makeTransport, ledgerline, aiFetch, smsFetch, userRoutesTestHooks, morningTestHooks, morningRuntime,
+    onAuthenticatedForTest: env.NODE_ENV === 'production' ? undefined : info => { sessions.set(info.session.id, info.session); return onAuthenticatedForTest?.(info); } }));
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
 
@@ -36,6 +38,8 @@ export async function startApp({ asOf = '2026-10-12', now = new Date('2026-10-12
 
   return {
     db, ids, csrf, base, env,
+    ownerSession: sessions.get(/fb_session=([^;]+)/.exec(cookie)?.[1]),
+    sessionFor: cookieText => sessions.get(/fb_session=([^;]+)/.exec(cookieText)?.[1]),
     clock: () => clock,
     advance: ms => { clock += ms; },
     get: path => rawGet(path, cookie),

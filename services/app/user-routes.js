@@ -1,10 +1,10 @@
-import { listCompanies, setUserCompanies } from '../../lib/data/companies.js';
+import { listCompanies, setUserCompanies, setUserCompaniesIn } from '../../lib/data/companies.js';
 import { randomBytes } from 'node:crypto';
 import qrcode from 'qrcode-generator';
 import { HttpError, tooMany, clientIp } from './http.js';
 import { ValidationError } from '../../lib/data/writes.js';
 import {
-  listUsers, getUser, inviteUser, resendInvite, resetSignIn, updateUser, setUserActive, findOpenInvite, pendingSecret, otpauthUri, completeInvite,
+  listUsers, getUser, inviteUser, resendInvite, resetSignIn, updateUserIn, userWriteOptions, setUserActive, findOpenInvite, pendingSecret, otpauthUri, completeInvite,
 } from '../../lib/data/users.js';
 import { getCompany, saveCompany, saveLogo, removeLogo, getLogo } from '../../lib/data/settings.js';
 import { settingsKey } from '../../lib/secrets.js';
@@ -14,12 +14,15 @@ import { publicMessage } from '../../lib/views/vendor-auto.js';
 import { withTransaction } from '../../lib/db.js';
 import { getProfile, saveProfileIn, suggestReturnType } from '../../lib/tax/periods.js';
 import { profileValues, profileFromForm, profileFields } from '../../lib/views/tax-profile-fields.js';
+import { trustedActor } from '../../lib/data/morning/access.js';
+import { protectedState } from '../../lib/data/morning/identity.js';
+import { withSecurityWrite } from '../../lib/data/morning/locks.js';
 
 export const COMPANY_UPLOAD_PATH = /^\/settings\/company\/logo$/;
 
 // Settings → Users and Settings → Company, and the company logo. h: the request helpers from index.js.
 export async function userRoutes(h) {
-  const { req, path, query, form, files, ctx, scope, pool, env, page, base, go, takeFlash, actor, who, send, res, extra, companyMailer, owner } = h;
+  const { req, path, query, form, files, ctx, scope, pool, env, page, base, go, takeFlash, actor, who, session, send, res, extra, companyMailer, owner, userRoutesTestHooks = {} } = h;
   const key = () => settingsKey(env);
   const selfId = who.userId;
 
@@ -80,12 +83,18 @@ export async function userRoutes(h) {
   // ---- users ----
   if (!path.startsWith('/settings/users')) return false;
   if (!ctx.orgAdmin) throw new HttpError(403, 'Only an admin who can open every company manages users.');
+  const actorCtx = trustedActor(who, ctx.orgId, session);
   const shell = (body, status = 200, flash = null) => page(usersPage({ ...base(), flash, body }), status);
   const origin = env.APP_BASE_URL ? env.APP_BASE_URL.replace(/\/$/, '') : `http://${req.headers.host ?? '127.0.0.1'}`;
 
   // Emails the link through the company's Settings → Email; the page also shows it once to copy.
-  async function sendLink(user, token, why) {
-    const link = `${origin}/invite/${token}`;
+  async function sendLink(user, issuance, why) {
+    const linkOrigin = issuance.ownerCopyOnly ? (env.APP_BASE_URL?.replace(/\/$/, '') ?? '') : origin;
+    const link = `${linkOrigin}/invite/${issuance.token}`;
+    if (issuance.ownerCopyOnly) {
+      shell(inviteSentBody({ user, link, ownerCopyOnly: true }));
+      return;
+    }
     let mailer = null, status = 'failed';
     try { mailer = await companyMailer(); } catch (error) { if (!(error instanceof ValidationError)) throw error; }
     if (mailer) {
@@ -112,9 +121,10 @@ export async function userRoutes(h) {
     const v = userFormValues(form);
     try {
       if (!v.allCompanies && !v.companyIds.length) throw new ValidationError('Choose at least one company, or let them open all companies.');
-      const { userId, token } = await inviteUser(pool, { orgId: ctx.orgId, fields: v, actor, key: key() });
-      await setUserCompanies(pool, { orgId: ctx.orgId, userId, all: v.allCompanies, entityIds: v.companyIds });
-      await sendLink(await getUser(pool, { orgId: ctx.orgId, userId }), token, 'You’re invited');
+      const issuance = await inviteUser(pool, { orgId: ctx.orgId, fields: v, actor, key: key() });
+      const { userId } = issuance;
+      await setUserCompanies(pool, { orgId: ctx.orgId, userId, all: v.allCompanies, entityIds: v.companyIds, actorCtx });
+      await sendLink(await getUser(pool, { orgId: ctx.orgId, userId }), issuance, 'You’re invited');
     } catch (error) {
       if (!(error instanceof ValidationError)) throw error;
       shell(userFormBody({ csrf: base().csrf, v, error: error.message, timeZone: ctx.timeZone, selfId, companies: await listCompanies(pool, { orgId: ctx.orgId }) }), 422);
@@ -125,10 +135,12 @@ export async function userRoutes(h) {
   if (!m) throw new HttpError(404, 'Not found');
   const userId = Number(m[1]);
   const user = await getUser(pool, { orgId: ctx.orgId, userId }) ?? (() => { throw new HttpError(404, 'User not found'); })();
+  const protectedUser = Boolean(await protectedState(pool, { orgId: ctx.orgId, userId }));
+  await userRoutesTestHooks.afterTargetLookup?.({ user, protectedUser });
   const back = `/settings/users/${userId}`;
   const showUser = async (v, error = null, status = 200) =>
     shell(userFormBody({ csrf: base().csrf, user: await getUser(pool, { orgId: ctx.orgId, userId }), v, error, timeZone: ctx.timeZone, selfId,
-      companies: await listCompanies(pool, { orgId: ctx.orgId }) }), status, error ? null : takeFlash());
+      companies: await listCompanies(pool, { orgId: ctx.orgId }), readOnly: protectedUser && !who.owner }), status, error ? null : takeFlash());
   const companyIdsOf = async id => (await pool.query('SELECT entity_id FROM app_user_company WHERE user_id = $1', [id])).rows.map(r => Number(r.entity_id));
   if (req.method === 'GET' && !m[2]) { await showUser({ ...userToValues(user), companyIds: await companyIdsOf(userId) }); return true; }
   if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed');
@@ -138,21 +150,23 @@ export async function userRoutes(h) {
         {
           const v = userFormValues(form);
           if (!v.allCompanies && !v.companyIds.length) throw new ValidationError('Choose at least one company, or let them open all companies.');
-          await updateUser(pool, { orgId: ctx.orgId, userId, fields: v, selfId });
-          await setUserCompanies(pool, { orgId: ctx.orgId, userId, all: v.allCompanies, entityIds: v.companyIds });
+          await withSecurityWrite(pool, userWriteOptions({ orgId: ctx.orgId, userId }), async tx => {
+            await updateUserIn(tx, { orgId: ctx.orgId, userId, fields: v, selfId, actorCtx });
+            await setUserCompaniesIn(tx, { orgId: ctx.orgId, userId, all: v.allCompanies, entityIds: v.companyIds, actorCtx });
+          });
         }
         go(back, 'ok', 'Saved.');
         return true;
       case '/resend':
-        await sendLink(user, await resendInvite(pool, { orgId: ctx.orgId, userId, actor, key: key() }), 'You’re invited');
+        await sendLink(user, await resendInvite(pool, { orgId: ctx.orgId, userId, actor, actorCtx, key: key() }), 'You’re invited');
         return true;
       case '/reset':
-        await sendLink(user, await resetSignIn(pool, { orgId: ctx.orgId, userId, actor, key: key() }), 'Set up your sign-in again');
+        await sendLink(user, await resetSignIn(pool, { orgId: ctx.orgId, userId, actor, actorCtx, key: key() }), 'Set up your sign-in again');
         return true;
       case '/deactivate':
       case '/activate': {
         const active = m[2] === '/activate';
-        await setUserActive(pool, { orgId: ctx.orgId, userId, active, selfId });
+        await setUserActive(pool, { orgId: ctx.orgId, userId, active, selfId, actorCtx });
         go(back, 'ok', `${user.name} is now ${active ? 'active' : 'inactive'}.`);
         return true;
       }
@@ -203,7 +217,7 @@ export async function publicInvite({ req, res, path, pool, env, send, readForm, 
   const sentNonce = String(params.get('nonce') ?? '');
   if (!sentNonce || sentNonce !== cookieNonce) throw new HttpError(403, 'This form expired. Open the link again.');
   try {
-    const user = await completeInvite(pool, { token, password: params.get('password'), password2: params.get('password2'), code: params.get('code'), key, now: now() });
+    const user = await completeInvite(pool, { token, orgSlug, password: params.get('password'), password2: params.get('password2'), code: params.get('code'), key, now: now() });
     send(res, 303, '', { ...headers, Location: '/', 'Set-Cookie': [auth.signIn(user), `${NONCE_COOKIE}=; Path=/invite/; Max-Age=0`] });
   } catch (error) {
     if (!(error instanceof ValidationError)) throw error;

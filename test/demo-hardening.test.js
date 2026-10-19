@@ -20,6 +20,73 @@ const pool = () => db.pool;
 const one = async (sql, args) => (await pool().query(sql, args)).rows[0];
 const n = async (sql, args) => Number((await one(sql, args)).n);
 
+test('Morning demo: settings writes are blocked and the sample owner is the only viewer', async () => {
+  const other = await freshDb();
+  try {
+    await resetDemo(other.pool, { env: DEMO, asOf: AS_OF });
+    const b = await startDemo({ pool: other.pool, demoCheckMs: 0 });
+    const v = await visitor(b).start();
+    const page = await v.get('/morning');
+    assert.equal(page.status, 200);
+    assert.match(await page.text(), /First look/);
+    assert.equal((await v.get('/settings/morning')).status, 200);
+    const state = async () => {
+      const result = {};
+      for (const table of ['morning_viewer', 'morning_preference', 'morning_delivery_setting', 'morning_transport', 'morning_message_claim'])
+        result[table] = (await other.pool.query(`SELECT * FROM ${table}`)).rows;
+      return result;
+    };
+    const initial = await state();
+    assert.deepEqual(initial.morning_viewer.map(r => [r.viewer_key, r.enrollment_state]), [['owner', 'ready']]);
+    for (const action of ['viewer', 'delivery', 'transport-approve', 'preferences']) {
+      const path = `/settings/morning/${action}`;
+      assert.equal(demoBlock('POST', path), 'Morning messages and viewer changes are off in the demo');
+      assert.equal(demoBlock('GET', path), null);
+      const response = await v.post(path, { action: 'grant', user_id: '1', enabled: '1', channel: 'sms' });
+      assert.equal(response.status, 403, path);
+      assert.match(await response.text(), /Morning messages and viewer changes are off in the demo/);
+    }
+    assert.deepEqual(await state(), initial, 'blocked settings change no Morning state');
+    assert.deepEqual(await demoProblems(other.pool), []);
+    await resetDemo(other.pool, { env: DEMO, asOf: AS_OF });
+    const next = await visitor(b).start();
+    const resetPage = await next.get('/morning');
+    assert.equal(resetPage.status, 200, 'the running demo restores its owner viewer after nightly reset');
+    assert.match(await resetPage.text(), /First look/);
+    assert.deepEqual((await state()).morning_viewer.map(r => r.viewer_key), ['owner']);
+  } finally { await other.drop(); }
+});
+
+test('Morning demo: the message runner returns before any database or provider work', async () => {
+  const { runMorningMessages } = await import('../lib/data/morning/messages.js');
+  const noDatabase = new Proxy({}, { get() { assert.fail('demo messages must not touch the database'); } });
+  assert.deepEqual(await runMorningMessages({ pool: noDatabase, env: DEMO }), { demo: true });
+  assert.deepEqual(await runMorningMessages({ pool: noDatabase, env: { ...DEMO, BOOKS_MODE: 'practice' } }), { demo: true });
+});
+
+test('Morning demo: sample and probe helpers refuse demo mode and a marked database before writes', async () => {
+  const { seedMorningScenario } = await import('../scripts/morning-sample.mjs');
+  const { prepareProbe, seedProbe } = await import('../scripts/morning-probe.mjs');
+  let writes = 0;
+  const guarded = { query: (sql, args) => {
+    if (/\b(?:TRUNCATE|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP)\b/i.test(typeof sql === 'string' ? sql : sql.text)) {
+      writes++;
+      throw new Error('Unexpected write before demo refusal');
+    }
+    return pool().query(sql, args);
+  } };
+  const clock = { now: () => new Date(), set() { assert.fail('sample must not change the clock'); } };
+  const sample = env => seedMorningScenario({ url: db.url, pool: guarded }, { scenario: 'first-look', clock,
+    env: { NODE_ENV: 'test', DATABASE_URL: db.url, ...env } });
+  await assert.rejects(sample(DEMO), /doesn’t run with DEMO_MODE=1/);
+  await assert.rejects(sample({}), /public demo/);
+  for (const fn of [prepareProbe, seedProbe]) {
+    await assert.rejects(fn(guarded, { env: DEMO }), /doesn’t run with DEMO_MODE=1/);
+    await assert.rejects(fn(guarded, { env: {} }), /public demo/);
+  }
+  assert.equal(writes, 0);
+});
+
 async function startDemo(opts = {}) {
   const server = http.createServer(createApp({ pool: pool(), env: DEMO, now: () => new Date(`${AS_OF}T17:00:00Z`), demoCheckMs: 10 * 60_000, ...opts }));
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));

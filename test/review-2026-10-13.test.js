@@ -124,7 +124,8 @@ test('an invitation from another organization doesn’t open here', async () => 
   const { createHash } = await import('node:crypto');
   const token = 'A'.repeat(43);
   await pool.query(`INSERT INTO user_invite (org_id, user_id, token_hash, expires_at) VALUES ($3, $1, $2, now() + interval '1 day')`, [u.user_id, createHash('sha256').update(token).digest('hex'), org.org_id]);
-  assert.ok(await findOpenInvite(pool, { token }), 'exists unscoped');
+  assert.equal(await findOpenInvite(pool, { token }), null, 'requires organization scope');
+  assert.ok(await findOpenInvite(pool, { token, orgSlug: 'other_org' }), 'exists in its organization');
   assert.equal(await findOpenInvite(pool, { token, orgSlug: 'sample' }), null, 'not for this organization');
   assert.equal((await fetch(`${app.base}/invite/${token}`)).status, 404);
 });

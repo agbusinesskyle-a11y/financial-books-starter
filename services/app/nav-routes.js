@@ -1,7 +1,8 @@
 import { HttpError } from './http.js';
 import { ValidationError } from '../../lib/data/writes.js';
 import { canAccess } from '../../lib/domain/roles.js';
-import { appNav, SOON } from '../../lib/views/nav.js';
+import { appNav, SOON, PIN_CHOICES } from '../../lib/views/nav.js';
+import { matchMorningRoute } from '../../lib/domain/morning-paths.js';
 import { addBookmark, removeBookmark, moveBookmarkUp, savePins, cleanHref } from '../../lib/data/nav.js';
 import { homeData } from '../../lib/data/home.js';
 import { globalSearch } from '../../lib/data/search.js';
@@ -14,7 +15,7 @@ export async function navRoutes(h) {
   const { req, res, path, query, form, scope, pool, page, base, go, takeFlash, who, ctx, navData, send, extra } = h;
   if (!PATHS.test(path)) return false;
   // The same as the sidebar's: people limited to some companies don't manage users or companies.
-  const can = p => canAccess(who.role, 'GET', p) && (ctx.orgAdmin || !/^\/settings\/(users|companies)(\/|$)/.test(p));
+  const can = h.canNavigate ?? (p => canAccess(who.role, 'GET', p) && (ctx.orgAdmin || !/^\/settings\/(users|companies)(\/|$)/.test(p)));
   const nav = () => appNav({ ...navData, role: who.role, can, path, search: '', title: '', csrf: base().csrf, entityName: ctx.entityName });
 
   if (req.method === 'GET') {
@@ -26,7 +27,8 @@ export async function navRoutes(h) {
     if (path === '/apps') { const n = nav(); page(appsPage({ ...base(), groups: n.groups, reports: n.reports })); return true; }
     if (path === '/create') { page(createPage({ ...base(), create: nav().create })); return true; }
     if (path === '/bookmarks') { page(bookmarksPage({ ...base(), flash: takeFlash(), bookmarks: navData.bookmarks })); return true; }
-    if (path === '/navigation') { page(navigationPage({ ...base(), flash: takeFlash(), pins: navData.pins })); return true; }
+    if (path === '/navigation') { page(navigationPage({ ...base(), flash: takeFlash(), pins: navData.pins,
+      pinChoices: PIN_CHOICES.filter(([key]) => key !== 'morning' || can('/morning')) })); return true; }
     if (path.startsWith('/soon/')) {
       const slug = path.slice(6);
       // Lending's placeholders became the Loans page; a bookmark saved on one still gets there.
@@ -51,6 +53,8 @@ export async function navRoutes(h) {
   const backTo = (fallback = '/bookmarks') => cleanHref(form.get('back')) ?? cleanHref(form.get('href')) ?? fallback;
   try {
     if (path === '/bookmarks/add') {
+      const target = cleanHref(form.get('href'));
+      if (target && matchMorningRoute('GET', target.split(/[?#]/)[0]) && !can(target.split(/[?#]/)[0])) throw new HttpError(403, 'This page is not available with your current access.');
       const href = await addBookmark(pool, { ...scope, who, href: form.get('href'), label: form.get('label') });
       return go(href, 'ok', 'Bookmarked. It’s under Bookmarks on the left.') ?? true;
     }
@@ -63,7 +67,7 @@ export async function navRoutes(h) {
       return go('/bookmarks') ?? true;
     }
     if (path === '/navigation') {
-      await savePins(pool, { ...scope, who, pins: form.getAll('pin') });
+      await savePins(pool, { ...scope, who, pins: form.getAll('pin').filter(key => key !== 'morning' || can('/morning')) });
       return go('/navigation', 'ok', 'Pinned apps saved.') ?? true;
     }
   } catch (error) {

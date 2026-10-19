@@ -27,6 +27,12 @@ import { insightRoutes } from './insight-routes.js';
 import { trackActor, withActor, setActor, logSignIn } from '../../lib/audit.js';
 import { partyCurrencyChoices, multicurrencyOn, rateOn } from '../../lib/data/currencies.js';
 import { checkSignIn, sessionUser } from '../../lib/data/users.js';
+import { LockBusyError, MorningTimeoutError } from '../../lib/data/morning/locks.js';
+import { MorningAccessError, appOrg, trustedActor, currentViewer, ensureOwnerViewer } from '../../lib/data/morning/access.js';
+import { ProtectedIdentityError } from '../../lib/data/morning/identity.js';
+import { randomBytes } from 'node:crypto';
+import { matchMorningRoute } from '../../lib/domain/morning-paths.js';
+import { morningRoutes, morningCan, filterVisibleLinks, FORBIDDEN_FIELDS } from './morning-routes.js';
 import { canAccess, homeFor } from '../../lib/domain/roles.js';
 import { createAuth, sameToken } from '../../lib/auth.js';
 import { todayIn } from '../../lib/domain/dates.js';
@@ -52,6 +58,7 @@ import {
 import { getPolicy, savePolicy, setCustomerLateFees, listCustomerLateFees } from '../../lib/data/latefees.js';
 import { listTermsWithUse, saveTerms, deleteTerms, listAllItems, getItem, saveItem } from '../../lib/data/catalog.js';
 import { runDailyJobs } from '../jobs/index.js';
+import { processMorningRuntime } from '../../lib/data/morning/locks.js';
 import { listProjects, getProject, listProjectTransactions, saveProject, deleteProject } from '../../lib/data/projects.js';
 import {
   listDocuments, listTxnDocuments, getDocument, addDocument, deleteDocument, downloadType, attachmentHeader, MAX_DOCUMENT_BYTES,
@@ -226,7 +233,9 @@ function parseApplications(apply) {
 // demoCheckMs, demoHeavyAtOnce: how often the public demo re-checks its database, and how many expensive pages it builds at
 // once (tests change them).
 export function createApp({ pool, env = process.env, now = () => new Date(), mailer = null, makeTransport = undefined, ledgerline = null, aiFetch = undefined, smsFetch = undefined,
+  userRoutesTestHooks = {}, morningTestHooks = {}, onAuthenticatedForTest, morningRuntime = processMorningRuntime,
   demoCheckMs = DEMO_CHECK_MS, demoHeavyAtOnce = DEMO_HEAVY_AT_ONCE }) {
+  if (env.NODE_ENV === 'production' && (Object.keys(userRoutesTestHooks).length || Object.keys(morningTestHooks).length || onAuthenticatedForTest)) throw new Error('Test hooks are not allowed in production');
   // The public demo (lib/domain/demo.js): no sign-in, and nothing reaches the outside world — no bank-data source, no AI
   // or Twilio calls, and every email only recorded (mailerFor; an injected mailer is ignored too).
   const demo = isDemo(env);
@@ -237,6 +246,9 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
     makeTransport = () => { throw new Error('Email is never sent from the public demo.'); };
   }
   const orgSlug = env.APP_ORG || 'sample';
+  const cursorSecret = randomBytes(32);
+  const morningReady = appOrg(pool, orgSlug).then(async org => { if (org) await ensureOwnerViewer(pool, org.orgId); return org; });
+  morningReady.catch(() => {}); // The request awaits and reports bootstrap failures.
   const httpsOnly = /^https:\/\//.test(env.APP_BASE_URL ?? '');
   // Every write the app makes is recorded in the audit log under the person making it.
   trackActor(pool);
@@ -302,6 +314,10 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
         const problems = await demoProblems(pool);
         const resetAt = (await readMarker(pool))?.reset_at?.toISOString() ?? null;
         if (demoCheck.resetAt !== undefined && resetAt !== demoCheck.resetAt) auth.reset();
+        if (!problems.length && resetAt !== demoCheck.resetAt) {
+          const org = await appOrg(pool, orgSlug);
+          if (org) await ensureOwnerViewer(pool, org.orgId);
+        }
         if (problems.length && demoCheck.ok !== false) console.error(`demo: not serving — this database is no longer a clean demo: ${problems.join('; ')}`);
         demoCheck = { at: Date.now(), ok: !problems.length, resetAt };
       } catch (error) {
@@ -317,6 +333,7 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
   const pdf = (res, body, filename) => send(res, 200, body, { 'Content-Type': 'application/pdf', 'Content-Disposition': `inline; filename="${filename}"` });
 
   async function routes(req, res) {
+    const configuredOrg = await morningReady;
     const url = new URL(req.url, 'http://localhost');
     const path = url.pathname;
     const query = Object.fromEntries(url.searchParams);
@@ -389,12 +406,27 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
       throw new HttpError(401, 'Sign in again');
     }
     const actor = who.name;
+    if (session.userId && who.orgId !== configuredOrg?.orgId) {
+      const cleared = { 'Set-Cookie': auth.end(session) };
+      if (req.method === 'GET') return redirect(res, '/login', cleared);
+      throw new HttpError(401, 'Sign in again');
+    }
+    if (onAuthenticatedForTest) await onAuthenticatedForTest({ who, session, orgId: configuredOrg?.orgId });
+    const morningRoute = matchMorningRoute(req.method, path);
+    if (morningRoute?.error) throw new HttpError(morningRoute.error, morningRoute.error === 405 ? 'Method not allowed' : 'Not found');
+    const identity = configuredOrg ? trustedActor(who, configuredOrg.orgId, session) : null;
+    let morningViewer = null;
+    if (identity) try { morningViewer = await currentViewer(pool, { identity }); } catch (error) {
+      if (!(error instanceof MorningAccessError) || !['not_viewer','pending'].includes(error.reason)) throw error;
+    }
+    if (morningRoute && !morningViewer) throw new HttpError(403, 'Morning View is limited to the owner and one named viewer.');
+    if (morningRoute?.ownerOnly && !morningViewer.isOwner) throw new HttpError(403, 'Only the owner can change this.');
     // The app's own address, for links in emails.
     const appOrigin = () => (env.APP_BASE_URL ? env.APP_BASE_URL.replace(/\/$/, '') : `http://${req.headers.host ?? '127.0.0.1'}`);
     // An admin ticked "change it anyway" on a reconciled transaction.
     // (Not in the public demo: a reconciled transaction stays as it is there.)
     const overrideOk = () => who.role === 'admin' && !demo && form?.get('edit_reconciled') === '1';
-    if (!canAccess(who.role, req.method, path)) {
+    if (!morningRoute && !canAccess(who.role, req.method, path)) {
       throw new HttpError(403, who.role === 'reports' && req.method !== 'GET' ? 'Your role can look but not change anything.' : 'Your role doesn’t include this page. Ask an admin if you need it.');
     }
     // The public demo: what could store a secret, reach outside or change how the server runs is closed (with the reason),
@@ -454,12 +486,13 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
         const most = Math.max(0, allN, ...[...new Set(form.keys())].map(k => form.getAll(k).length));
         if (most > DEMO_BATCH_MAX) throw new HttpError(403, `The demo handles at most ${DEMO_BATCH_MAX} at a time. Choose fewer and try again.`);
       }
+      if (morningRoute) for (const field of FORBIDDEN_FIELDS) if (form.has(field)) throw new HttpError(400, 'Unexpected field.');
       if (path === '/logout') return redirect(res, '/login', { 'Set-Cookie': auth.logout(req) });
       // The same rendered form sent twice (double tap, resend): the second is ignored. Checked and recorded in one
       // synchronous step, so two requests arriving together can't both pass; forgotten again if the first one failed.
       // Only the id shape the forms render is remembered (a few bytes each), never whatever a request sends.
       const once = FORM_ONCE.test(form.get('form_once') ?? '') ? form.get('form_once') : null;
-      if (once) {
+      if (once && !morningRoute) {
         session.formsUsed ??= new Map();
         if (session.formsUsed.has(once)) {
           session.flash = { kind: 'ok', text: 'That was already sent, so the second submit was ignored.' };
@@ -473,6 +506,10 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
       }
     } else if (req.method !== 'GET') throw new HttpError(405, 'Method not allowed');
 
+    if (morningRoute) {
+      await morningTestHooks.afterRouteCheck?.({ identity, route: morningRoute });
+      return morningRoutes({ req,res,path,query,form,pool,identity,route:morningRoute,session,send,extra,cursorSecret,now,runtime:morningRuntime,env,hooks:morningTestHooks,who });
+    }
     const ctx = await context(session, who);
     // A signed-in person belongs to one organization; their session never opens another organization's books.
     if (session.userId && who.orgId !== ctx.orgId) {
@@ -482,15 +519,16 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
     }
     const scope = { orgId: ctx.orgId, entityId: ctx.entityId };
     // Links to pages the person's role can't open are taken out of the page.
-    const visible = body => (who.role === 'admin' ? String(body)
-      : String(body).replace(/<a href="(\/[^"]*)"[^>]*>[^<]*<\/a>/g, (a, href) => (canAccess(who.role, 'GET', href.split(/[?#]/)[0]) ? a : '')));
+    const canNavigate = p => morningCan(p, morningViewer, x => canAccess(who.role, 'GET', x) && (ctx.orgAdmin || !/^\/settings\/(users|companies)(\/|$)/.test(x)));
+    const visible = body => filterVisibleLinks(body, canNavigate);
     // The navigation for this person (lib/views/nav.js), swapped in for the simple header the layout leaves marked.
     const navData = await getNav(pool, { ...scope, who });
+    navData.bookmarks = navData.bookmarks.filter(b => canNavigate(b.href.split(/[?#]/)[0]));
     const withNav = body => {
       const s = String(body);
       if (!s.includes('<!--fb:nav-top-->')) return s;
       const title = (/<title>([^<]*?)(?: · Financial Books)?<\/title>/.exec(s)?.[1] ?? '').replace(/&amp;/g, '&').replace(/&#39;/g, '’').replace(/&quot;/g, '"').replace(/&lt;|&gt;/g, '');
-      const nav = appNav({ ...navData, role: who.role, can: p => canAccess(who.role, 'GET', p) && (ctx.orgAdmin || !/^\/settings\/(users|companies)(\/|$)/.test(p)), path, search: url.search, title, csrf: session.csrf, entityName: ctx.entityName,
+      const nav = appNav({ ...navData, role: who.role, can: canNavigate, path, search: url.search, title, csrf: session.csrf, entityName: ctx.entityName,
         companies: ctx.companies, entityId: ctx.entityId,
         canBookmark: req.method === 'GET',
         panelOpen: !/(?:^|;\s*)fb_panel=0/.test(req.headers.cookie ?? '') });
@@ -498,7 +536,7 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
       return swap(swap(swap(s.replace('<body>', '<body class="with-nav">'), 'nav-top', nav.top), 'nav-rail', String(nav.rail) + String(nav.panel)), 'nav-bottom', nav.bottom);
     };
     const page = (body, status = 200) => send(res, status, withNav(visible(body)), extra);
-    const base = () => ({ entityName: ctx.entityName, csrf: session.csrf, role: who.role, orgAdmin: ctx.orgAdmin });
+    const base = () => ({ entityName: ctx.entityName, csrf: session.csrf, role: who.role, orgAdmin: ctx.orgAdmin, morningViewer: Boolean(morningViewer) });
     // Saving the QBO way (stage F1): the person's main save choice for a form, and where "close" returns to — the page the
     // form was opened from (this app only; never back into a form).
     const refererBack = () => {
@@ -968,7 +1006,7 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
     }
 
     // ---- vendors (and, from stage V3, their transactions) ----
-    const helpers = { req, res, path, query, form, files, ctx, scope, pool, env, page, base, go, takeFlash, actor, who, owner: auth.configured || auth.devNoAuth ? owner : null, send, extra, companyMailer, attempt, ledgerline, aiFetch, smsFetch, saveOpts, saveChoice, appOrigin,
+    const helpers = { req, res, path, query, form, files, ctx, scope, pool, env, page, base, go, takeFlash, actor, who, canNavigate, owner: auth.configured || auth.devNoAuth ? owner : null, send, extra, companyMailer, attempt, ledgerline, aiFetch, smsFetch, saveOpts, saveChoice, appOrigin,
       headersFor, batchMax: demo ? DEMO_BATCH_MAX : 200, reportYears: demo ? DEMO_REPORT_YEARS : null, mgmtSections: demo ? DEMO_MGMT_SECTIONS : null };
     if (await companyRoutes({ ...helpers, session })) return;
     if (await bankFeedRoutes(helpers)) return;
@@ -980,7 +1018,7 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
     if (await navRoutes({ ...helpers, navData, url })) return;
     if (await listRoutes(helpers)) return;
     if (await vendorRoutes(helpers)) return;
-    if (await userRoutes(helpers)) return;
+    if (await userRoutes({ ...helpers, session, userRoutesTestHooks })) return;
     if (await ledgerToolsRoutes(helpers)) return;
     if (await loanRoutes(helpers)) return;
     if (await taxRoutes(helpers)) return;
@@ -1375,13 +1413,21 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
       await withActor(() => withDisplay(() => routes(req, res)));
     } catch (error) {
       req.demoSlotDone?.();
+      if (error instanceof MorningAccessError && ['stale_session','foreign_org'].includes(error.reason) && req.method === 'GET') {
+        const { session } = auth.current(req);
+        return redirect(res, `/login?next=${encodeURIComponent(req.url)}`, session ? { 'Set-Cookie': auth.end(session) } : {});
+      }
       const locked = error?.code === 'P0001' && /^Imported from QuickBooks/.test(error.message ?? '');
-      const status = error instanceof HttpError ? error.status : locked ? 409 : 500;
+      const connectionFailure = /^08|^ECONN|^EPIPE/.test(error?.code ?? '') || error?.code === '57P01'
+        || /Query read timeout|Connection terminated|connection error/i.test(error?.message ?? '');
+      const unavailable = error instanceof LockBusyError || error instanceof MorningTimeoutError || error.morningConnectionFailure || connectionFailure;
+      const status = unavailable ? 503 : error instanceof ProtectedIdentityError ? 403 : error instanceof MorningAccessError
+        ? ['stale_session','foreign_org'].includes(error.reason) ? 401 : 403 : error instanceof HttpError ? error.status : locked ? 409 : 500;
       if (status === 500) console.error(`request failed: ${req.method} ${req.url?.split('?')[0]}: ${error.stack || error.message}`);
       if (res.headersSent) { res.end(); return; }
       const title = { 409: 'Imported from QuickBooks', 400: 'Bad request', 401: 'Sign in required', 403: demo ? 'Not in the demo' : 'Not allowed', 404: 'Not found', 405: 'Not allowed', 413: 'Too large', 415: 'Not supported', 429: 'Slow down', 503: 'Not ready' }[status] ?? 'Something went wrong';
-      const message = status === 500 ? 'The server hit an error. What it was doing may not have finished; check before trying again.' : error.message;
-      send(res, status, String(messagePage({ title, message })));
+      const message = unavailable ? 'This operation is unavailable. Try again.' : status === 500 ? 'The server hit an error. What it was doing may not have finished; check before trying again.' : error.message;
+      send(res, status, String(messagePage({ title, message })), unavailable ? { 'Retry-After': '1' } : {});
     }
     req.demoSlotDone?.();
   };
@@ -1410,12 +1456,13 @@ export async function main(env = process.env) {
   // Bank feeds read ledgerline (read-only) when LEDGERLINE_URL is set.
   const ledgerline = demo ? null : ledgerlinePool(env);
   if (ledgerline && env.LEDGERLINE_ORG_ID) await assignTenant(pool, { orgSlug: env.APP_ORG || 'sample', llOrgId: env.LEDGERLINE_ORG_ID });
-  const server = http.createServer(createApp({ pool, env, ledgerline }));
+  const morningRuntime = processMorningRuntime;
+  const server = http.createServer(createApp({ pool, env, ledgerline, morningRuntime }));
   server.listen(port, host, () => console.log(`financial-books listening on http://${host}:${port}`));
   // Daily jobs (recurring transactions, late fees): shortly after start, then hourly. Every run is
   // idempotent, so hourly just means "within an hour of midnight". RUN_JOBS=0 turns this off.
   if (env.RUN_JOBS !== '0' && !demo) {
-    const tick = () => runDailyJobs({ pool, env, log: console.log }).catch(error => console.error(`jobs failed: ${error.stack || error.message}`));
+    const tick = () => runDailyJobs({ pool, env, morningRuntime, log: console.log }).catch(error => console.error(`jobs failed: ${error.stack || error.message}`));
     setTimeout(tick, 10_000).unref();
     setInterval(tick, 60 * 60 * 1000).unref();
   }

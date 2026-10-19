@@ -10,10 +10,18 @@ import { REPORTS } from '../lib/reports/registry.js';
 import { GROUPS, REPORTS_MENU, GEAR, CREATE } from '../lib/views/nav.js';
 import { startApp } from './app-harness.js';
 import { tieout } from './tieout.js';
+import { mvUser, signInAs, mvCompleteSetup } from './morning-fixtures.js';
+import { trustedActor } from '../lib/data/morning/access.js';
+import { grantSecondViewer } from '../lib/data/morning/identity.js';
+import { saveSmsSettings } from '../lib/sms/twilio.js';
+import { settingsKey } from '../lib/secrets.js';
+import { approveTransport, transportSource } from '../lib/data/morning/transport.js';
 
 // Stage B1: several companies in one account, each its own books. Company B is a second copy of the sample
-// with every name starting "Zeta "; working in company A, no page, report, search or record of B may ever show up, and
+// with every name starting "Zeta "; working in company A, no ordinary page, report, search or record of B may show up, and
 // nothing typed into A's forms can reach B's records.
+// Morning View intentionally spans companies for its two authorized viewers;
+// The replacement below and morning-security.test.js check those boundaries.
 const TODAY = '2026-10-12';
 let app, pool, A, B, b;
 const ZETA = /Zeta /;
@@ -54,6 +62,8 @@ test('working in company A, no page or report shows anything of company B', asyn
   for (const r of REPORTS) paths.add(`/reports/r/${r.key}?run=1&period=all`);
   let checked = 0;
   for (const p of paths) {
+    const pathname = new URL(p, 'https://books.sample.example').pathname;
+    if (/^\/(?:morning|settings\/morning)(?:\/|$)/.test(pathname)) continue;
     const res = await app.get(p);
     if (res.status !== 200) continue;
     const body = await res.text();
@@ -176,4 +186,64 @@ test('each company’s display settings stay its own, even at the same moment', 
     return formatShortDate('2026-01-02');
   })));
   assert.deepEqual(out, ['2/1/26', '1/2/26', '2026-01-02']);
+});
+
+test('Morning is the only cross-company exception and excluded identities have neither routes nor links', async () => {
+  app.env.SETTINGS_KEY = 'ab'.repeat(32);
+  app.env.APP_BASE_URL = 'https://books.sample.example';
+  const key = settingsKey(app.env), actorCtx = trustedActor({ owner: true }, A.orgId, app.ownerSession);
+  assert.equal((await app.get('/settings/morning')).status, 200);
+  await saveSmsSettings(pool, { orgId: A.orgId, enabled: true, accountSid: `AC${'ab'.repeat(16)}`, authToken: 'cd'.repeat(16), phone: '+16025550190', key, actor: 'the owner' });
+  let source = await transportSource(pool, { orgId: A.orgId, channel: 'sms', env: app.env });
+  await approveTransport(pool, { actorCtx, channel: 'sms', revision: source.row?.source_revision ?? 1, fingerprint: source.fingerprint, env: app.env });
+  source = await transportSource(pool, { orgId: A.orgId, channel: 'sms', env: app.env });
+  const decode = s => s.replaceAll('&amp;', '&').replaceAll('&quot;', '"').replaceAll('&#39;', "'");
+  const ownerBody = await (await app.get('/morning')).text();
+  assert.match(ownerBody, ZETA);
+  const form = /<form\b[^>]*action="\/morning\/dismiss"[^>]*>([^]*?)<\/form>/.exec(ownerBody);
+  assert.ok(form, 'a current owner dismissal form');
+  const fields = Object.fromEntries([...form[1].matchAll(/<input[^>]*name="([^"]+)"[^>]*value="([^"]*)"/g)].map(m => [m[1], decode(m[2])]));
+  delete fields.csrf;
+  const bank = (await one("SELECT account_id FROM account WHERE entity_id=$1 AND type='bank' LIMIT 1", [A.entityId])).account_id;
+  const state = async () => {
+    const out = {};
+    const tables = (await pool.query("SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename LIKE 'morning_%' ORDER BY tablename")).rows;
+    for (const { tablename } of tables) out[tablename] = (await one(`SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]') AS rows FROM ${tablename} t`)).rows;
+    return out;
+  };
+  for (const [i, role] of ['admin', 'admin', 'reports', 'standard'].entries()) {
+    const email = `excluded${i}@sample.example`, u = await mvUser(pool, { orgId: A.orgId, email, role, allCompanies: i !== 1 });
+    if (i === 1) await pool.query('INSERT INTO app_user_company(org_id,user_id,entity_id) VALUES($1,$2,$3)', [A.orgId, u.userId, A.entityId]);
+    const client = await signInAs(app, { ...u, email });
+    const routes = [
+      ['GET', '/morning'], ['GET', `/morning/accounts/${bank}`], ['GET', '/morning/entries'], ['GET', '/morning/attention'], ['GET', '/morning/dismissed'], ['GET', '/settings/morning'],
+      ['POST', '/morning/dismiss', { ...fields, note: 'sample' }], ['POST', '/morning/undismiss', { item_key: fields.item_key }],
+      ['POST', '/settings/morning/preferences', { enabled: '1', send_time: '06:30', channel: 'sms', phone: '+16025550100', include_amounts: '', detail_threshold: '500' }],
+      ['POST', '/settings/morning/floors', { account_id: bank, floor: '100.00' }], ['POST', '/settings/morning/viewer', { action: 'grant', user_id: u.userId }],
+      ['POST', '/settings/morning/company-threshold', { entity_id: A.entityId, threshold: '25000.00' }], ['POST', '/settings/morning/delivery', { enabled: '1' }],
+      ['POST', '/settings/morning/transport-approve', { channel: 'sms', revision: source.row.source_revision, fingerprint: source.fingerprint }],
+    ];
+    for (const [method, path, body] of routes) {
+      const before = await state(), res = method === 'GET' ? await client.get(path) : await client.post(path, body);
+      assert.equal(res.status, 403, `${role}/${i} ${method} ${path}`);assert.deepEqual(await state(), before);
+    }
+    for (const path of ['/home', '/settings', '/search?q=Morning', '/apps', '/bookmarks', '/navigation']) {
+      const res = await client.get(path);assert.equal(res.status, 200, `${role} ${path}`);
+      assert.doesNotMatch(await res.text(), /href="\/(?:morning|settings\/morning)(?:["/?])/);
+    }
+  }
+  const u = await mvUser(pool, { orgId: A.orgId, email: 'allowed@sample.example', role: 'reports', allCompanies: false });
+  await pool.query('INSERT INTO app_user_company(org_id,user_id,entity_id) VALUES($1,$2,$3)', [A.orgId, u.userId, A.entityId]);
+  const issue = await grantSecondViewer(pool, { actorCtx, orgId: A.orgId, userId: u.userId, key, now: new Date(app.clock()) });
+  const setup = await mvCompleteSetup(app, { token: issue.token });
+  const client = { get: path => fetch(app.base + path, { redirect: 'manual', headers: { cookie: setup.cookie } }) };
+  for (const who of [app, client]) {
+    for (const path of ['/home', '/vendors', '/customers', '/reports', '/search?q=zeta']) {
+      const res = await who.get(path);assert.equal(res.status, 200);assert.doesNotMatch(await res.text(), ZETA);
+    }
+    const session = who === app ? app.ownerSession : app.sessionFor(setup.cookie), selected = session.entityId;
+    assert.equal(selected, A.entityId);
+    for (const path of ['/morning', '/settings/morning']) {const res = await who.get(path);assert.equal(res.status, 200);assert.match(await res.text(), ZETA);}
+    assert.equal(session.entityId, selected);
+  }
 });

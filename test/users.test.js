@@ -3,6 +3,11 @@ import assert from 'node:assert/strict';
 import { makeTotp } from '../lib/auth.js';
 import { canAccess } from '../lib/domain/roles.js';
 import { startApp } from './app-harness.js';
+import http from 'node:http';
+import { mvUser } from './morning-fixtures.js';
+import { trustedActor } from '../lib/data/morning/access.js';
+import { grantSecondViewer } from '../lib/data/morning/identity.js';
+import { settingsKey } from '../lib/secrets.js';
 
 const sent = [];
 const mailer = { kind: 'smtp', from: 'books@sample.example', async send(m) { sent.push(m); return { status: 'sent' }; } };
@@ -13,6 +18,32 @@ after(async () => { await app.close(); });
 const cookieOf = res => (res.headers.getSetCookie?.() ?? []).map(c => c.split(';')[0]).filter(c => !/=$/.test(c)).join('; ');
 const form = (path, body, cookie) => fetch(app.base + path, { method: 'POST', redirect: 'manual',
   headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(body).toString() });
+
+test('code-r1 B1: protected reset and resend ignore Host without a configured origin', async () => {
+  const orgId = app.ids.orgId;
+  const user = await mvUser(app.db.pool, { orgId, email: 'protected@sample.example' });
+  await grantSecondViewer(app.db.pool, { orgId, userId: user.userId,
+    actorCtx: trustedActor({ owner: true }, orgId, app.ownerSession), key: settingsKey(app.env), now: new Date(app.clock()) });
+  const sentBefore = sent.length;
+  for (const action of ['reset', 'resend']) {
+    const response = await new Promise((resolve, reject) => {
+      const request = http.request(`${app.base}/settings/users/${user.userId}/${action}`, {
+        method: 'POST', headers: { Host: 'untrusted.sample.invalid', cookie: `fb_session=${app.ownerSession.id}`,
+          'content-type': 'application/x-www-form-urlencoded' },
+      }, res => {
+        let body = '';
+        res.setEncoding('utf8'); res.on('data', chunk => { body += chunk; });
+        res.on('end', () => resolve({ status: res.statusCode, body }));
+      });
+      request.on('error', reject); request.end(new URLSearchParams({ csrf: app.csrf }).toString());
+    });
+    assert.equal(response.status, 200);
+    assert.match(response.body, /Copy this link/);
+    assert.match(response.body, /\/invite\/[A-Za-z0-9_-]{43}/);
+    assert.doesNotMatch(response.body, /untrusted\.sample\.invalid/);
+    assert.equal(sent.length, sentBefore, 'protected setup is copy-only');
+  }
+});
 
 // A signed-in client for someone else (cookie from their own sign-in).
 function client(cookie) {

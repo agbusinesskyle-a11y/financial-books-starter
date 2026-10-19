@@ -14,6 +14,7 @@ import { linkCompany, linkChoices, saveMappings } from '../lib/data/bankfeeds.js
 import { addItem, matchItem, transferItem, undoItem, getBankItem, matchCandidates } from '../lib/data/banking.js';
 import { saveTransfer, voidLedgerTxn, reconcileState } from '../lib/data/ledger-tools.js';
 import { setUserCompanies } from '../lib/data/companies.js';
+import { trustedActor } from '../lib/data/morning/access.js';
 import { auditReport } from '../lib/reports/audit.js';
 import { withTransaction } from '../lib/db.js';
 import { writeVendorDoc } from '../lib/data/payables.js';
@@ -87,7 +88,8 @@ test('#1 an admin limited to some companies can’t manage people or companies, 
 
 test('#17 company access can’t be changed for a person of another organization', async () => {
   const { rows: [u] } = await pool().query(`SELECT user_id FROM app_user WHERE email = 'ada@sample.example'`);
-  await assert.rejects(setUserCompanies(pool(), { orgId: S.orgId + 999, userId: u.user_id, all: true }), /User not found/);
+  await assert.rejects(setUserCompanies(pool(), { orgId: S.orgId + 999, userId: u.user_id, all: true,
+    actorCtx: trustedActor({ owner: true }, S.orgId + 999, app.ownerSession) }), /User not found/);
   assert.equal((await pool().query('SELECT count(*)::int AS n FROM app_user_company WHERE user_id = $1', [u.user_id])).rows[0].n, 1);
 });
 

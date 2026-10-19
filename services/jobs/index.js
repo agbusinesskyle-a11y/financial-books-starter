@@ -16,6 +16,8 @@ import { runReportSchedules } from '../../lib/reports/schedule.js';
 import { runManagementSchedules } from '../../lib/reports/management.js';
 import { isDemo, checkDemoMode } from '../../lib/domain/demo.js';
 import { guardDatabase } from '../../lib/data/demo.js';
+import { processMorningRuntime } from '../../lib/data/morning/locks.js';
+import { runMorningMessages } from '../../lib/data/morning/messages.js';
 
 // Daily jobs for every company: recurring transactions (customer and vendor), late fees, invoice reminders, scheduled bill payments, scheduled report emails. Each company's "today" is in
 // its own time zone. Safe to run as often as you like (hourly from the app, or `npm run jobs`):
@@ -23,7 +25,7 @@ import { guardDatabase } from '../../lib/data/demo.js';
 // runners from overlapping.
 const LOCK_KEY = 815_215_001;
 
-export async function runDailyJobs({ pool, env = process.env, now = () => new Date(), makeTransport, mailer = null, log = () => {} }) {
+export async function runDailyJobs({ pool, env = process.env, now = () => new Date(), makeTransport, mailer = null, log = () => {}, morningRuntime = processMorningRuntime, morningTestHooks = {} }) {
   // A practice copy creates, charges and sends nothing on its own (lib/domain/practice.js).
   if (isPractice(env)) { log('jobs: practice copy — daily jobs are off'); return { practice: true }; }
   // Neither does the public demo: nothing is created, charged or sent while nobody is looking (lib/domain/demo.js).
@@ -82,6 +84,9 @@ export async function runDailyJobs({ pool, env = process.env, now = () => new Da
         summary.reportsSent += packs.sent;
         summary.reportsFailed += packs.failed;
       });
+      try {
+        summary.morning = await runMorningMessages({ pool, env, clock: {wall:now,mono:()=>performance.now()}, runtime:morningRuntime, log, testHooks:morningTestHooks });
+      } catch(error) { log(`jobs: morning view: ${String(error.message).slice(0,200)}`); }
       log(`jobs: ${JSON.stringify(summary)}`);
       return summary;
     } finally {

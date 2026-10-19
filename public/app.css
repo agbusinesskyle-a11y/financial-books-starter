@@ -760,3 +760,36 @@ summary .inline-heading { display: inline; font-size: 1.15rem; }
 .rule-accounts legend { font-weight: 600; }
 .rule-accounts p { flex-basis: 100%; margin: 0; }
 @media (max-width: 700px) { .rule-split-line { grid-template-columns: 1fr 1fr; } }
+/* Morning View keeps the cross-company read model usable on a phone. */
+.morning-settings { display: grid; gap: 1.5rem; min-width: 0; overflow-wrap: anywhere; }
+.morning-settings section, .morning-settings form, .morning-settings .field { min-width: 0; max-width: 100%; }
+.morning-settings form { display: grid; grid-template-columns: minmax(0, 1fr); gap: .75rem; margin-bottom: 1rem; }
+.morning-settings .field { grid-template-columns: minmax(0, 1fr); }
+.morning-settings .field input, .morning-settings .field select { min-width: 0; max-width: 100%; }
+.morning-settings button { justify-self: start; max-width: 100%; white-space: normal; }
+.morning { display: grid; gap: 1.5rem; min-width: 0; overflow-wrap: anywhere; }
+.morning section, .morning details, .morning li, .morning form { min-width: 0; max-width: 100%; }
+.morning section { padding: 1rem; border: 1px solid var(--border, #d7dce2); border-radius: .6rem; }
+.morning h2 { margin-top: 0; }
+.morning-headline { font-size: 1.45rem; font-weight: 650; }
+.morning details { margin: .7rem 0; padding: .7rem; background: var(--surface, #fafbfc); }
+.morning summary { cursor: pointer; }
+.morning-accounts { width: 100%; table-layout: fixed; border-collapse: collapse; }
+.morning-accounts th, .morning-accounts td { padding: .5rem; text-align: left; white-space: normal; }
+.morning-list { list-style: none; padding: 0; }
+.morning-list > li { padding: .8rem 0; border-bottom: 1px solid var(--border, #d7dce2); }
+.morning-counts, .morning-links { display: flex; flex-wrap: wrap; gap: .8rem 1.5rem; }
+.morning-counts dd { margin: 0; font-size: 1.2rem; font-weight: 600; }
+.morning form { display: flex; flex-wrap: wrap; align-items: end; gap: .5rem; }
+.morning input { max-width: 100%; min-width: 0; box-sizing: border-box; }
+.morning-action span { display: block; }
+.morning-notice, .morning-coverage { border-left: 3px solid #a66515; padding-left: .7rem; }
+@media (max-width: 600px) {
+  .morning-accounts, .morning-accounts tbody { display: block; }
+  .morning-accounts thead { display: none; }
+  .morning-accounts tr { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); border-bottom: 1px solid #d7dce2; }
+  .morning-accounts td { display: block; min-width: 0; overflow-wrap: anywhere; }
+  .morning-accounts td::before { content: attr(data-label); display: block; font-size: .8rem; color: #626a73; }
+  .morning-accounts td:last-child { grid-column: 1 / -1; }
+  .morning section { padding: .7rem; }
+}
