@@ -164,6 +164,9 @@ outline:
    `APP_BASE_URL=https://<your address>`, and `TRUST_PROXY=1`. Make **new** secrets for the hosted copy:
    `node scripts/setup-env.js --database-url <the app role address> --out .env.hosted` makes them, and you then delete
    that file.
+   Optional `APP_OWNER_USER_ID`: the Settings > Users account id that is the owner; leave unset to use only the blank-email owner sign-in.
+   Set it only after that account exists in `APP_ORG`, using its positive integer id. The blank-email sign-in remains
+   available for recovery. Leave `APP_OWNER_USER_ID` unset in the demo.
 3. The start command is `npm start`. It runs the migrations, then the app. The health check is `/healthz`.
 4. Run `npm run new-books -- --company "…"` once against the hosted database (or import from QuickBooks).
 
@@ -189,7 +192,7 @@ the clean sample is rebuilt, dated as of that day so the demo always looks curre
   receipts, bank connections or online payments, no stored secret of any kind, and no data in tables the app doesn't
   make. The running demo checks this again every minute and stops serving if it ever fails. They also refuse if the
   server has settings a real copy has: `SETTINGS_KEY`, the owner sign-in (`APP_LOGIN_PASSWORD_HASH`,
-  `APP_TOTP_SECRET`), `DEV_NO_AUTH`, bank feeds (`LEDGERLINE_URL`), `PAYMENTS_TEST_MODE`, `BOOKS_MODE`, or an `APP_ORG`
+  `APP_TOTP_SECRET`, `APP_OWNER_USER_ID`), `DEV_NO_AUTH`, bank feeds (`LEDGERLINE_URL`), `PAYMENTS_TEST_MODE`, `BOOKS_MODE`, or an `APP_ORG`
   other than `sample`. Without `SETTINGS_KEY` nothing secret can be saved at all.
 - **Normal books refuse a demo database**: without `DEMO_MODE=1`, the app, migrations and jobs won't open a database
   that carries the mark, and `npm run new-books`, `npm run import-qbo`, `scripts/tax-baseline-import.mjs` and
@@ -249,7 +252,7 @@ Use a **new** project with a **new, empty** database, never one that holds books
    - `TRUST_PROXY=1` (so the per-visitor limit sees each visitor's address, not Railway's proxy)
    - `DATABASE_URL=<the app role address from step 1>`
 
-   Don't set `SETTINGS_KEY`, `APP_LOGIN_PASSWORD_HASH`, `APP_TOTP_SECRET`, `APP_ORG`, `BOOKS_MODE`, `LEDGERLINE_URL` or
+   Don't set `SETTINGS_KEY`, `APP_LOGIN_PASSWORD_HASH`, `APP_TOTP_SECRET`, `APP_OWNER_USER_ID`, `APP_ORG`, `BOOKS_MODE`, `LEDGERLINE_URL` or
    `PAYMENTS_TEST_MODE`: the demo refuses to start with them.
 3. **The first reset** happens on its own: on a new, empty database the app's start command builds the demo before it
    starts. (By hand, from your computer: `DEMO_MODE=1 DATABASE_URL=<app role address> npm run demo-reset`.)

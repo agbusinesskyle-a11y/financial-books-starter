@@ -27,9 +27,10 @@ import { insightRoutes } from './insight-routes.js';
 import { trackActor, withActor, setActor, logSignIn } from '../../lib/audit.js';
 import { partyCurrencyChoices, multicurrencyOn, rateOn } from '../../lib/data/currencies.js';
 import { checkSignIn, sessionUser } from '../../lib/data/users.js';
-import { LockBusyError, MorningTimeoutError } from '../../lib/data/morning/locks.js';
+import { LockBusyError, MorningTimeoutError, withSecurityWrite } from '../../lib/data/morning/locks.js';
 import { MorningAccessError, appOrg, trustedActor, currentViewer, ensureOwnerViewer } from '../../lib/data/morning/access.js';
-import { ProtectedIdentityError } from '../../lib/data/morning/identity.js';
+import { ProtectedIdentityError, protectedState, revokeMembershipIn } from '../../lib/data/morning/identity.js';
+import { ownerUserIdFromEnv, validateOwnerAccount } from '../../lib/owner-account.js';
 import { randomBytes } from 'node:crypto';
 import { matchMorningRoute } from '../../lib/domain/morning-paths.js';
 import { morningRoutes, morningCan, filterVisibleLinks, FORBIDDEN_FIELDS } from './morning-routes.js';
@@ -235,6 +236,7 @@ function parseApplications(apply) {
 export function createApp({ pool, env = process.env, now = () => new Date(), mailer = null, makeTransport = undefined, ledgerline = null, aiFetch = undefined, smsFetch = undefined,
   userRoutesTestHooks = {}, morningTestHooks = {}, onAuthenticatedForTest, morningRuntime = processMorningRuntime,
   demoCheckMs = DEMO_CHECK_MS, demoHeavyAtOnce = DEMO_HEAVY_AT_ONCE }) {
+  const ownerUserId = ownerUserIdFromEnv(env);
   if (env.NODE_ENV === 'production' && (Object.keys(userRoutesTestHooks).length || Object.keys(morningTestHooks).length || onAuthenticatedForTest)) throw new Error('Test hooks are not allowed in production');
   // The public demo (lib/domain/demo.js): no sign-in, and nothing reaches the outside world — no bank-data source, no AI
   // or Twilio calls, and every email only recorded (mailerFor; an injected mailer is ignored too).
@@ -247,7 +249,18 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
   }
   const orgSlug = env.APP_ORG || 'sample';
   const cursorSecret = randomBytes(32);
-  const morningReady = appOrg(pool, orgSlug).then(async org => { if (org) await ensureOwnerViewer(pool, org.orgId); return org; });
+  const morningReady = appOrg(pool, orgSlug).then(async org => {
+    await validateOwnerAccount(pool, { ownerUserId, orgId: org?.orgId });
+    if (org) {
+      await ensureOwnerViewer(pool, org.orgId);
+      if (ownerUserId !== null) await withSecurityWrite(pool, { orgId: org.orgId, userIds: [ownerUserId] }, async tx => {
+        if (await protectedState(tx, { orgId: org.orgId, userId: ownerUserId })) {
+          await revokeMembershipIn(tx, { orgId: org.orgId, viewerKey: String(ownerUserId) });
+        }
+      });
+    }
+    return org;
+  });
   morningReady.catch(() => {}); // The request awaits and reports bootstrap failures.
   const httpsOnly = /^https:\/\//.test(env.APP_BASE_URL ?? '');
   // Every write the app makes is recorded in the audit log under the person making it.
@@ -367,7 +380,7 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
     if (path.startsWith('/pay/') || path.startsWith('/webhooks/payments/')) setActor('Online payment');
     if (path.startsWith('/vendor-info/')) return publicVendorInfo({ req, res, path, pool, env, send, readForm });
     // The page an invited person opens to set their password and authenticator.
-    if (path.startsWith('/invite/')) return publicInvite({ req, res, path, pool, env, send, readForm, auth, now, orgSlug });
+    if (path.startsWith('/invite/')) return publicInvite({ req, res, path, pool, env, send, readForm, auth, now, orgSlug, ownerUserId });
     // Online invoice payments: the customer's pay page, the test processor's checkout, and the processor's signed webhook.
     if (path.startsWith('/pay/') || path.startsWith('/webhooks/payments/')) {
       // A practice copy takes no money: customers pay through QuickBooks until the company goes live.
@@ -398,7 +411,8 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
     }
     const extra = setCookie ? { 'Set-Cookie': setCookie } : {};
     // Who is signed in, reloaded on every request so deactivating someone or changing their role takes effect at once.
-    const who = session.userId ? await sessionUser(pool, { userId: session.userId, version: session.version }) : owner;
+    const who = session.userId ? await sessionUser(pool, { userId: session.userId, version: session.version,
+      orgId: configuredOrg?.orgId, ownerUserId }) : owner;
     if (who) setActor(who.name);
     if (!who) {
       const cleared = { 'Set-Cookie': auth.end(session) };
@@ -414,7 +428,7 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
     if (onAuthenticatedForTest) await onAuthenticatedForTest({ who, session, orgId: configuredOrg?.orgId });
     const morningRoute = matchMorningRoute(req.method, path);
     if (morningRoute?.error) throw new HttpError(morningRoute.error, morningRoute.error === 405 ? 'Method not allowed' : 'Not found');
-    const identity = configuredOrg ? trustedActor(who, configuredOrg.orgId, session) : null;
+    const identity = configuredOrg ? trustedActor(who, configuredOrg.orgId, session, ownerUserId) : null;
     let morningViewer = null;
     if (identity) try { morningViewer = await currentViewer(pool, { identity }); } catch (error) {
       if (!(error instanceof MorningAccessError) || !['not_viewer','pending'].includes(error.reason)) throw error;
@@ -1006,7 +1020,9 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
     }
 
     // ---- vendors (and, from stage V3, their transactions) ----
-    const helpers = { req, res, path, query, form, files, ctx, scope, pool, env, page, base, go, takeFlash, actor, who, canNavigate, owner: auth.configured || auth.devNoAuth ? owner : null, send, extra, companyMailer, attempt, ledgerline, aiFetch, smsFetch, saveOpts, saveChoice, appOrigin,
+    const helpers = { req, res, path, query, form, files, ctx, scope, pool, env, page, base, go, takeFlash, actor, who, identity, canNavigate,
+      owner: who.owner ? who : null, breakGlassOwner: auth.configured || auth.devNoAuth ? owner : null,
+      send, extra, companyMailer, attempt, ledgerline, aiFetch, smsFetch, saveOpts, saveChoice, appOrigin,
       headersFor, batchMax: demo ? DEMO_BATCH_MAX : 200, reportYears: demo ? DEMO_REPORT_YEARS : null, mgmtSections: demo ? DEMO_MGMT_SECTIONS : null };
     if (await companyRoutes({ ...helpers, session })) return;
     if (await bankFeedRoutes(helpers)) return;
@@ -1018,7 +1034,9 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
     if (await navRoutes({ ...helpers, navData, url })) return;
     if (await listRoutes(helpers)) return;
     if (await vendorRoutes(helpers)) return;
-    if (await userRoutes({ ...helpers, session, userRoutesTestHooks })) return;
+    // Books may be imported after startup found no organization. Users writes need a trusted actor
+    // for the request's resolved organization, retaining the server's owner designation.
+    if (await userRoutes({ ...helpers, identity: trustedActor(who, ctx.orgId, session, ownerUserId), session, userRoutesTestHooks })) return;
     if (await ledgerToolsRoutes(helpers)) return;
     if (await loanRoutes(helpers)) return;
     if (await taxRoutes(helpers)) return;
@@ -1408,7 +1426,7 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
     throw new HttpError(404, 'Not found');
   }
 
-  return async function handler(req, res) {
+  const handler = async function handler(req, res) {
     try {
       await withActor(() => withDisplay(() => routes(req, res)));
     } catch (error) {
@@ -1431,9 +1449,12 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
     }
     req.demoSlotDone?.();
   };
+  handler.ready = morningReady;
+  return handler;
 }
 
 export async function main(env = process.env) {
+  ownerUserIdFromEnv(env);
   console.log(`books mode: ${checkBooksMode(env)}`);
   // DEMO_MODE=1: the public demo (lib/domain/demo.js). A typo, or a real server's settings alongside it, stops here.
   let demo;
@@ -1457,7 +1478,15 @@ export async function main(env = process.env) {
   const ledgerline = demo ? null : ledgerlinePool(env);
   if (ledgerline && env.LEDGERLINE_ORG_ID) await assignTenant(pool, { orgSlug: env.APP_ORG || 'sample', llOrgId: env.LEDGERLINE_ORG_ID });
   const morningRuntime = processMorningRuntime;
-  const server = http.createServer(createApp({ pool, env, ledgerline, morningRuntime }));
+  let app;
+  try {
+    app = createApp({ pool, env, ledgerline, morningRuntime });
+    await app.ready;
+  } catch (error) {
+    await Promise.all([pool.end(), ledgerline?.end()]);
+    throw error;
+  }
+  const server = http.createServer(app);
   server.listen(port, host, () => console.log(`financial-books listening on http://${host}:${port}`));
   // Daily jobs (recurring transactions, late fees): shortly after start, then hourly. Every run is
   // idempotent, so hourly just means "within an hour of midnight". RUN_JOBS=0 turns this off.

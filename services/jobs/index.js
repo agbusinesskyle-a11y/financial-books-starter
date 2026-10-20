@@ -18,6 +18,8 @@ import { isDemo, checkDemoMode } from '../../lib/domain/demo.js';
 import { guardDatabase } from '../../lib/data/demo.js';
 import { processMorningRuntime } from '../../lib/data/morning/locks.js';
 import { runMorningMessages } from '../../lib/data/morning/messages.js';
+import { ownerUserIdFromEnv } from '../../lib/owner-account.js';
+import { appOrg } from '../../lib/data/morning/access.js';
 
 // Daily jobs for every company: recurring transactions (customer and vendor), late fees, invoice reminders, scheduled bill payments, scheduled report emails. Each company's "today" is in
 // its own time zone. Safe to run as often as you like (hourly from the app, or `npm run jobs`):
@@ -30,6 +32,8 @@ export async function runDailyJobs({ pool, env = process.env, now = () => new Da
   if (isPractice(env)) { log('jobs: practice copy — daily jobs are off'); return { practice: true }; }
   // Neither does the public demo: nothing is created, charged or sent while nobody is looking (lib/domain/demo.js).
   if (isDemo(env)) { log('jobs: public demo — daily jobs are off'); return { demo: true }; }
+  const ownerUserId = ownerUserIdFromEnv(env);
+  const ownerOrg = ownerUserId === null ? null : await appOrg(pool, env.APP_ORG || 'sample');
   const lock = await pool.connect();
   try {
     const { rows: [{ ok }] } = await lock.query('SELECT pg_try_advisory_lock($1) AS ok', [LOCK_KEY]);
@@ -77,7 +81,9 @@ export async function runDailyJobs({ pool, env = process.env, now = () => new Da
         summary.billsPaid += pays.paid;
         summary.paymentsFailed += pays.failed;
         // Saved reports on an email schedule.
-        const reports = await runReportSchedules(pool, { ...scope, today, timeZone: e.time_zone, mailer: async () => mailer ?? mailerFor(pool, { ...scope, env, makeTransport }) });
+        const reports = await runReportSchedules(pool, { ...scope, today, timeZone: e.time_zone,
+          ownerUserId: e.org_id === ownerOrg?.orgId ? ownerUserId : null,
+          mailer: async () => mailer ?? mailerFor(pool, { ...scope, env, makeTransport }) });
         summary.reportsSent += reports.sent;
         summary.reportsFailed += reports.failed;
         const packs = await runManagementSchedules(pool, { ...scope, today, timeZone: e.time_zone, mailer: async () => mailer ?? mailerFor(pool, { ...scope, env, makeTransport }) });

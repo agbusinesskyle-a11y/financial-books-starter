@@ -5,7 +5,7 @@ import { freshDb } from './harness.js';
 import { createApp } from '../services/app/index.js';
 import { tooMany, limiterKeys } from '../services/app/http.js';
 import { fitBuckets, bucketCount, timeBuckets } from '../lib/reports/periods.js';
-import { DEMO_NOTE, DEMO_HEAVY_PER_IP, DEMO_BATCH_MAX, DEMO_FORMS_PER_SESSION, demoBlock } from '../lib/domain/demo.js';
+import { DEMO_NOTE, DEMO_HEAVY_PER_IP, DEMO_BATCH_MAX, DEMO_FORMS_PER_SESSION, demoBlock, checkDemoMode } from '../lib/domain/demo.js';
 import { demoProblems, resetDemo, appTables, readMarker } from '../lib/data/demo.js';
 
 // The public demo, hardened after review: report work is bounded before it starts and expensive pages are throttled;
@@ -19,6 +19,21 @@ const servers = [];
 const pool = () => db.pool;
 const one = async (sql, args) => (await pool().query(sql, args)).rows[0];
 const n = async (sql, args) => Number((await one(sql, args)).n);
+
+test('demo refuses an owner account designation before database access and ignores it in disabled jobs', async () => {
+  const { runDailyJobs } = await import('../services/jobs/index.js');
+  const { runMorningMessages } = await import('../lib/data/morning/messages.js');
+  const noDatabase = new Proxy({}, { get() { assert.fail('demo owner designation must not touch the database'); } });
+  assert.equal(checkDemoMode(DEMO), 'demo', 'unset owner designation preserves the demo');
+  for (const value of ['1', '999999', 'invalid']) {
+    const env = { ...DEMO, APP_OWNER_USER_ID: value };
+    assert.throws(() => checkDemoMode(env), /APP_OWNER_USER_ID/);
+    assert.throws(() => createApp({ pool: noDatabase, env }), /APP_OWNER_USER_ID/);
+    await assert.rejects(resetDemo(noDatabase, { env, asOf: AS_OF }), /APP_OWNER_USER_ID/);
+    assert.deepEqual(await runDailyJobs({ pool: noDatabase, env }), { demo: true });
+    assert.deepEqual(await runMorningMessages({ pool: noDatabase, env }), { demo: true });
+  }
+});
 
 test('Morning demo: settings writes are blocked and the sample owner is the only viewer', async () => {
   const other = await freshDb();

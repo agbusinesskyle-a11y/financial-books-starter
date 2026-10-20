@@ -36,7 +36,7 @@ export function filterVisibleLinks(body, can) {
 }
 export async function renderMorningShell(tx, { identity, session, body, path, csrf }) {
   const viewer = await validateMorningIdentityIn(tx,{identity});
-  const who = identity.owner ? { owner:true,userId:null,role:'admin',allCompanies:true } : await sessionUser(tx,{userId:identity.userId,version:identity.sessionVersion});
+  const who = identity.owner ? { owner:true,userId:identity.userId,role:'admin',allCompanies:true } : await sessionUser(tx,{userId:identity.userId,version:identity.sessionVersion});
   const { rows } = await tx.query('SELECT entity_id,name,time_zone FROM entity WHERE org_id=$1 ORDER BY lower(name),entity_id',[identity.orgId]);
   const companies = who.owner || who.allCompanies ? rows : rows.filter(r=>who.companyIds.includes(r.entity_id));
   const copy = { ...session };
