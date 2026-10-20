@@ -25,15 +25,52 @@ test('demo refuses an owner account designation before database access and ignor
   const { runMorningMessages } = await import('../lib/data/morning/messages.js');
   const noDatabase = new Proxy({}, { get() { assert.fail('demo owner designation must not touch the database'); } });
   assert.equal(checkDemoMode(DEMO), 'demo', 'unset owner designation preserves the demo');
-  for (const value of ['1', '999999', 'invalid']) {
+  assert.equal(checkDemoMode({ ...DEMO, APP_OWNER_USER_ID: undefined }), 'demo');
+  for (const value of ['', ' \t ', '1', '999999', 'invalid']) {
     const env = { ...DEMO, APP_OWNER_USER_ID: value };
-    assert.throws(() => checkDemoMode(env), /APP_OWNER_USER_ID/);
+    assert.throws(() => checkDemoMode(env), /DEMO_MODE=1 refused:[\s\S]*APP_OWNER_USER_ID/);
     assert.throws(() => createApp({ pool: noDatabase, env }), /APP_OWNER_USER_ID/);
-    await assert.rejects(resetDemo(noDatabase, { env, asOf: AS_OF }), /APP_OWNER_USER_ID/);
+    await assert.rejects(resetDemo(noDatabase, { env, asOf: AS_OF }), /DEMO_MODE=1 refused:[\s\S]*APP_OWNER_USER_ID/);
     assert.deepEqual(await runDailyJobs({ pool: noDatabase, env }), { demo: true });
     assert.deepEqual(await runMorningMessages({ pool: noDatabase, env }), { demo: true });
   }
 });
+
+test('demo still accepts empty values for the other blocked settings', () => {
+  for (const name of ['SETTINGS_KEY', 'APP_LOGIN_PASSWORD_HASH', 'APP_TOTP_SECRET', 'DEV_NO_AUTH',
+    'LEDGERLINE_URL', 'LEDGERLINE_ORG_ID', 'PAYMENTS_TEST_MODE', 'APP_ORG', 'BOOKS_MODE']) {
+    assert.equal(checkDemoMode({ ...DEMO, [name]: '' }), 'demo', name);
+  }
+});
+
+for (const script of ['services/app/index.js', 'services/migrate/index.js', 'services/jobs/index.js', 'scripts/demo-reset.js']) {
+  test(`demo owner configuration is refused before database access by ${script}`, async t => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    // Trap database methods in the real CLI process, even if its error handler catches the failure.
+    const preload = `import pg from ${JSON.stringify(import.meta.resolve('pg'))};
+      const fail = () => { console.error('DATABASE_ACCESS_ATTEMPTED'); throw new Error('DATABASE_ACCESS_ATTEMPTED'); };
+      for (const type of [pg.Client, pg.Pool]) for (const method of ['connect', 'query']) type.prototype[method] = fail;
+      console.log('DATABASE_TRAPS_READY');`;
+    const guard = `data:text/javascript,${encodeURIComponent(preload)}`;
+    for (const value of ['', ' \t ', '1', '999999', 'invalid']) {
+      await t.test(`APP_OWNER_USER_ID=${JSON.stringify(value)}`, async () => {
+        await assert.rejects(promisify(execFile)(process.execPath, ['--import', guard, script], {
+          cwd: new URL('../', import.meta.url), timeout: 30_000, windowsHide: true,
+          env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, DATABASE_URL: db.url,
+            ALLOW_SUPERUSER: '1', DEMO_MODE: '1', APP_OWNER_USER_ID: value },
+        }), error => {
+          assert.equal(error.code, 1, error.stderr);
+          assert.match(error.stdout, /DATABASE_TRAPS_READY/);
+          assert.doesNotMatch(error.stdout + error.stderr, /DATABASE_ACCESS_ATTEMPTED/);
+          assert.match(error.stderr, /APP_OWNER_USER_ID/);
+          if (script !== 'services/app/index.js') assert.match(error.stderr, /DEMO_MODE=1 refused:/);
+          return true;
+        });
+      });
+    }
+  });
+}
 
 test('Morning demo: settings writes are blocked and the sample owner is the only viewer', async () => {
   const other = await freshDb();
