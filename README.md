@@ -266,6 +266,8 @@ Use a **new** project with a **new, empty** database, never one that holds books
 Other hosts work the same way: one app (`npm run demo-start`), one Postgres database, and a daily scheduled
 `npm run demo-reset`.
 
+Operations for self-hosted copies: see [the runbooks](docs/runbooks/). The rebuild tools refuse public demo databases.
+
 ## How it's built (for whoever maintains it)
 
 - Node 22, plain `node:http`, `pg`, server-rendered HTML. There is no front-end framework and no build step.

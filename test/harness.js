@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { createPool } from '../lib/db.js';
 import { runMigrations } from '../lib/migrate.js';
 
-const ADMIN_URL = process.env.TEST_DATABASE_URL || 'postgres://postgres@127.0.0.1:5432/postgres';
+export const ADMIN_URL = process.env.TEST_DATABASE_URL || 'postgres://postgres@127.0.0.1:5432/postgres';
 
 // A throwaway, fully migrated database. Call drop() in an after() hook.
 export async function freshDb({ migrate = true } = {}) {

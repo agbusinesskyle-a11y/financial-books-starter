@@ -1,0 +1,51 @@
+import { PG_DUMP, PG_RESTORE } from './pg-clients.js';
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { writeFile, readFile, utimes } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { join } from 'node:path';
+import { ADMIN_URL } from './harness.js';
+import { makeDb,q,invoke,saved,dir,runFile } from './rebuild-fixture.js';
+
+test('S3 truncated payload refuses clear; exact rehearsed bytes and all restored counts are required',async()=>{
+  const db=await makeDb({imported:true});
+  const carry=join(dir,'s3-carry.json'),dump=join(dir,'s3.dump'),bad=join(dir,'s3-bad.dump'),admin=join(dir,'admin.url');
+  await writeFile(carry,JSON.stringify(await saved(db))); await utimes(carry,new Date(0),new Date(0));
+  await writeFile(admin,ADMIN_URL);
+  await runFile(PG_DUMP,['-Fc','-d',db.url,'-f',dump]);
+  const result=await invoke('dump-rehearse',[dump,admin]);
+  assert.equal(result.code,0,result.stderr);
+  const receiptFile=dump+'.receipt.json', receipt=JSON.parse(await readFile(receiptFile,'utf8')), bytes=await readFile(dump);
+  assert.equal(receipt.sha256,createHash('sha256').update(bytes).digest('hex'));
+  assert.equal(receipt.size,bytes.length);
+  assert.equal(receipt.tableCounts['public.txn'],25);
+  assert.ok(Date.parse(receipt.rehearsedAt));
+  assert.equal((await q(db,'SELECT count(*) n FROM pg_database WHERE datname=$1',[receipt.rehearsalDatabase]))[0].n,0);
+  const args=['--carry-over',carry,'--dump',dump];
+  assert.notEqual((await invoke('clear-books',args,db)).code,0,'receipt is mandatory');
+  assert.equal((await invoke('clear-books',[...args,'--rehearsed',receiptFile],db)).code,0);
+  await writeFile(bad,bytes.subarray(0,bytes.length-256));
+  await runFile(PG_RESTORE,['-l',bad]);
+  const truncated=await invoke('clear-books',['--carry-over',carry,'--dump',bad,'--rehearsed',receiptFile,'--apply'],db);
+  assert.equal(truncated.code,1);assert.match(truncated.stderr,/payload/);
+  const rehearsal=await invoke('dump-rehearse',[bad,admin]);assert.equal(rehearsal.code,1);
+  await assert.rejects(readFile(bad+'.receipt.json'),{code:'ENOENT'});
+  await writeFile(dump,Buffer.concat([bytes,Buffer.from('changed')]));
+  const changed=await invoke('clear-books',[...args,'--rehearsed',receiptFile,'--apply'],db);
+  assert.equal(changed.code,1);assert.match(changed.stderr,/sha256/);
+  await writeFile(dump,bytes);
+  const wrong=join(dir,'wrong-receipt.json');
+  await writeFile(wrong,JSON.stringify({...receipt,tableCounts:{...receipt.tableCounts,'public.txn':24}}));
+  const counts=await invoke('clear-books',[...args,'--rehearsed',wrong,'--apply'],db);
+  assert.equal(counts.code,1);assert.match(counts.stderr,/count/);
+  assert.equal((await q(db,'SELECT count(*) n FROM txn'))[0].n,25);
+  const cleared=await invoke('clear-books',[...args,'--rehearsed',receiptFile,'--apply'],db);
+  assert.equal(cleared.code,0,cleared.stderr);
+  assert.equal((await q(db,'SELECT count(*) n FROM entity'))[0].n,0);
+});
+
+test('rehearsal rejects a remote admin URL before connecting',async()=>{
+  const admin=join(dir,'remote.url');await writeFile(admin,'postgres://sample@remote.invalid/postgres');
+  const result=await invoke('dump-rehearse',[join(dir,'missing.dump'),admin]);
+  assert.equal(result.code,1);assert.match(result.stderr,/local/);
+});

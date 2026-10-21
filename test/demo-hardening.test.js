@@ -1,3 +1,4 @@
+import { PG_DUMP, PG_RESTORE, PSQL } from './pg-clients.js';
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -19,6 +20,82 @@ const servers = [];
 const pool = () => db.pool;
 const one = async (sql, args) => (await pool().query(sql, args)).rows[0];
 const n = async (sql, args) => Number((await one(sql, args)).n);
+
+test('true-up demo: every rebuild CLI refuses demo mode and marked databases before reading evidence or writing output', async t => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const { mkdtemp, writeFile, readdir, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { ADMIN_URL } = await import('./harness.js');
+  const dir = await mkdtemp(join(tmpdir(), 'fb-demo-rebuild-'));
+  const normal = await freshDb();
+  try {
+    const demoUrl = join(dir, 'demo.url'), normalUrl = join(dir, 'normal.url'), adminUrl = join(dir, 'admin.url');
+    await writeFile(demoUrl, db.url); await writeFile(normalUrl, normal.url); await writeFile(adminUrl, ADMIN_URL);
+    const missing = join(dir, 'missing.json'), out = join(dir, 'out.json');
+    const evidence = ['--companies', missing, '--exports', join(dir, 'missing-exports')];
+    const cases = [
+      ['carry-over', ['save', out, '--org', 'missing-org']],
+      ['carry-over', ['report', missing, '--org', 'missing-org']],
+      ...['books', 'links', 'feeds'].flatMap(phase => [false, true].map(apply =>
+        ['carry-over', ['apply', missing, '--org', 'missing-org', '--phase', phase, ...(apply ? ['--apply'] : [])]])),
+      ...[false, true].map(apply => ['clear-books', ['--carry-over', missing, '--dump', missing, ...(apply ? ['--apply'] : [])]]),
+      ...[false, true].flatMap(apply => [
+        ['copy-books', [demoUrl, normalUrl, ...evidence, ...(apply ? ['--apply'] : [])]],
+        ['copy-books', [normalUrl, demoUrl, ...evidence, ...(apply ? ['--apply'] : [])]],
+      ]),
+      ['rebuild-check', [demoUrl, '2026-10-20', '--out', out, ...evidence]],
+    ];
+    const snapshot = async () => ({
+      marker: (await db.pool.query('SELECT * FROM demo_marker')).rows,
+      txns: await n('SELECT count(*) AS n FROM txn'),
+      postings: await n('SELECT count(*) AS n FROM posting'),
+      audit: await n('SELECT count(*) AS n FROM audit_log'),
+    });
+    const before = await snapshot();
+    for (const mode of ['1', '0']) {
+      const commands = mode === '1' ? [...cases, ['dump-rehearse', [missing, adminUrl]]] : cases;
+      for (const [script, args] of commands) await t.test(`${script} ${args.join(' ')} DEMO_MODE=${mode}`, async () => {
+        await assert.rejects(promisify(execFile)(process.execPath, [`scripts/${script}.mjs`, ...args], {
+          timeout: 30_000, windowsHide: true,
+          env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, DATABASE_URL: db.url,
+            ALLOW_SUPERUSER: '1', DEMO_MODE: mode },
+        }), error => {
+          assert.equal(error.code, 1, error.stderr);
+          assert.match(error.stderr, mode === '1' ? /doesn’t run with DEMO_MODE=1/ : /public demo/);
+          return true;
+        });
+      });
+    }
+    assert.deepEqual(await snapshot(), before, 'the demo and its mark remain untouched');
+    assert.deepEqual((await readdir(dir)).sort(), ['admin.url', 'demo.url', 'normal.url'], 'no output or receipt');
+    assert.equal((await normal.pool.query('SELECT count(*)::int AS n FROM org')).rows[0].n, 0, 'normal copy target stays empty');
+  } finally { await normal.drop(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('true-up demo: dump rehearsal refuses a restored demo mark and cleans up its own throwaway database', async () => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const { mkdtemp, writeFile, readdir, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { ADMIN_URL } = await import('./harness.js');
+  const dir = await mkdtemp(join(tmpdir(), 'fb-demo-rehearse-'));
+  try {
+    const dump = join(dir, 'demo.dump'), admin = join(dir, 'admin.url');
+    await writeFile(admin, ADMIN_URL);
+    await promisify(execFile)(PG_DUMP, ['-Fc', '-d', db.url, '-f', dump]);
+    const databases = async () => (await db.pool.query('SELECT datname FROM pg_database ORDER BY datname')).rows;
+    const before = await databases();
+    await assert.rejects(promisify(execFile)(process.execPath, ['scripts/dump-rehearse.mjs', dump, admin], {
+      timeout: 60_000, windowsHide: true,
+      env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, DEMO_MODE: '0', PG_RESTORE, PSQL },
+    }), error => error.code === 1 && /public demo/.test(error.stderr));
+    assert.deepEqual(await databases(), before, 'only the tool-created rehearsal database was dropped');
+    assert.deepEqual((await readdir(dir)).sort(), ['admin.url', 'demo.dump'], 'no acceptance receipt for a demo archive');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
 
 test('demo refuses an owner account designation before database access and ignores it in disabled jobs', async () => {
   const { runDailyJobs } = await import('../services/jobs/index.js');
