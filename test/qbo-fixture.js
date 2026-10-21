@@ -44,7 +44,7 @@ export const TXNS = [
   ['05/04/2024', 'Journal Entry', 'JE-4', null, 'Bad debt', [['Accounts Receivable', 0, 150], ['Bad Debt', 150, 0]]],
   // A voided check: QuickBooks shows it with no amounts.
   ['05/10/2024', 'Check', '104', 'Hangar Co', 'Voided', [['Operating', 0, 0], ['Repairs', 0, 0]]],
-  // A card refund paid to a customer: a card credit has no customer, so it stays a journal entry naming them (KYL-648).
+  // A card refund paid to a customer: a card credit has no customer, so it stays a journal entry naming them.
   ['06/15/2024', 'Credit Card Credit', null, 'Flight School', 'Customer paid on the card', [['Visa', 75, 0], ['Rental income', 0, 75]]],
 ];
 export const OPEN = [{ side: 'ar', type: 'Invoice', date: '2024-04-05', num: '1003', name: 'Flight School', open: 70000, due: '2024-05-05' },
