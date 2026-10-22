@@ -98,6 +98,16 @@ commands, or set `APP_ORG`; there is no built-in org default. Use the linked dep
     as resolution. Refresh bank feeds after mappings so transaction items arrive.
     Closed accounts use the owner's current exclusion list. Renames and native transactions remain decisions;
     carry-over does not automatically recreate them. Native applications also remain decisions: re-apply them by hand after the rebuild, checking both transaction identities, amount and applied date against existing settlements to avoid duplication. Each decision shows the decrease to the credit unapplied amount and charge open amount; verify both final open amounts against the saved values. Omitting `--apply` produces a read-only plan in `planned`, without consuming sequence values. Writer validation happens during the actual apply; review its skips and leftovers.
+    Integration credentials and links are carried in the books phase. Token hashes are copied verbatim with
+    their public token IDs and metadata: issued bearer strings contain those IDs, and hashing again or allocating
+    new IDs would invalidate them. No plaintext bearer is saved. Protect this artifact like the other saved
+    credentials; printable reports omit hashes. Revocations survive, and retries never reactivate tokens or reset
+    current rate counters. Conflicting credential IDs are leftovers and must be resolved before enabling clients.
+    External links retain `(source, source_ref)` and request hashes, resolving transactions by their complete
+    natural accounting identity in the named company. Missing, ambiguous, changed or unsupported transactions
+    and conflicting links remain leftovers; never reconnect them using old numeric transaction IDs. Review all
+    integration leftovers before enabling writes. Integration writes stay off after restore; the rebuilt copy
+    receives a new instance ID, so clients must refresh their settlement snapshots.
 11. Re-run the tax setup scripts in `<imports>\tax-books`: profiles, parties, periods, owners, baselines and
     EIN reconciliation. Confirm company identities before scripts that use fixed entity ids.
 12. Prove the copy: `node scripts/rebuild-check.mjs "<imports>\books-db-app-public.url" <date> --companies "<imports>\changeover\state\companies-map.json" --exports "<imports>\exports\<date>"` must exit 0.

@@ -23,3 +23,10 @@ test('a freshly migrated database has no unclassified table', async () => {
   const unclassified = await classifyTables(db.pool);
   assert.deepEqual(unclassified, []);
 });
+
+test('integration credentials and external links are carried, never discarded', () => {
+  for (const table of ['api_token', 'external_ref', 'integration_setting']) {
+    assert.ok(CARRIED_TABLES.includes(table), table);
+    assert.ok(!TRANSIENT_TABLES.includes(table), table);
+  }
+});

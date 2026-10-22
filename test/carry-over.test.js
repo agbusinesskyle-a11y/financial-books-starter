@@ -10,6 +10,10 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { entityByName, accountByName, customerByName, vendorByName } from '../lib/rebuild/keys.js';
+import { mintToken, revokeToken } from '../lib/integration/tokens.js';
+import { authenticateBearer } from '../lib/integration/auth.js';
+import { carryOverReport } from '../lib/rebuild/carry-over.js';
+import { validateCarryStructure, validateCarryCounts } from '../lib/rebuild/carry-validation.js';
 
 let db, ids;
 before(async () => { db = await freshDb(); ids = await writeSample(db.pool, generateSample({ asOf: '2026-10-12' })); });
@@ -179,4 +183,126 @@ test('carry-over CLI requires --org or APP_ORG and reports without printing save
     assert.ok(!out.stdout.includes('v1:aaa:bbb:ccc'));
     await assert.rejects(run(['report', file, '--org', 'someone-else']), e => e.code === 1 && /carry-over:/.test(e.stderr));
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+async function integrationCarryFixture() {
+  const source = await freshDb(), target = await freshDb();
+  const seed = generateSample({ asOf: '2026-10-12' });
+  const s = await writeSample(source.pool, seed);
+  // All referenced rows move; the public token ID is the deliberate exception.
+  for (const table of ['org', 'entity', 'account', 'customer', 'vendor', 'txn']) {
+    await target.pool.query('SELECT setval(pg_get_serial_sequence($1,$2),1000)', [table, `${table}_id`]);
+  }
+  const t = await writeSample(target.pool, seed);
+  await source.pool.query("SELECT setval(pg_get_serial_sequence('api_token','token_id'),40)");
+  const args = { orgId:s.orgId, entityId:s.entityId, name:'Sample connector', source:'sample_connector',
+    scopes:['documents:write','settlements:read'], actor:'tester' };
+  const active = await mintToken(source.pool, args), revoked = await mintToken(source.pool, args);
+  await revokeToken(source.pool, { ...args, tokenId:revoked.tokenId });
+  await source.pool.query("UPDATE api_token SET last_used_at='2026-10-21T12:00:00Z',rate_window='2026-10-21T12:00:00Z',rate_count=7");
+  const original = (await source.pool.query("SELECT * FROM txn WHERE type='invoice' ORDER BY txn_id LIMIT 1")).rows[0];
+  const rebuilt = (await target.pool.query('SELECT * FROM txn WHERE doc_number=$1 AND type=$2', [original.doc_number,original.type])).rows[0];
+  for (const namespace of ['sample_connector','sample_other']) await source.pool.query(`INSERT INTO external_ref
+    (org_id,entity_id,source,source_ref,txn_id,request_hash) VALUES($1,$2,$3,'invoice:sample',$4,$5)`,
+  [s.orgId,s.entityId,namespace,original.txn_id,'a'.repeat(64)]);
+  const saved = JSON.parse(JSON.stringify(await saveCarryOver(source.pool, { orgSlug:'sample' })));
+  const apply = (data=saved, dryRun=false) => applyCarryOver(target.pool, { data, phase:'books', dryRun, env:{} });
+  return { source,target,s,t,args,active,revoked,original,rebuilt,saved,apply,
+    drop:async () => { await target.drop(); await source.drop(); } };
+}
+
+test('carry restores integration links by transaction identity and preserves issued tokens through JSON and reruns', async () => {
+  const f = await integrationCarryFixture();
+  try {
+    const co = f.saved.companies[0], tokens = (await f.source.pool.query('SELECT * FROM api_token ORDER BY token_id')).rows;
+    assert.equal(co.apiTokens.length, 2);
+    assert.equal(co.apiTokens[0].tokenHash, tokens[0].token_hash.toString('hex'));
+    assert.equal(co.externalRefs.length, 2);
+    assert.equal(co.externalRefs[0].transaction.identityRepresentable, true);
+    assert.equal(co.externalRefs[0].transaction.docNumber, f.original.doc_number);
+    assert.ok(!Object.hasOwn(co.externalRefs[0], 'txnId'));
+    assert.ok(!Object.hasOwn(co.externalRefs[0], 'refId'));
+    for (const table of ['api_token','external_ref']) {
+      assert.ok(!f.saved.discarded.some(r => r.table === table));
+      assert.ok(!f.saved.leftovers.some(r => r.table === table));
+    }
+    validateCarryStructure(f.saved);
+    await validateCarryCounts(f.source.pool, f.saved);
+    for (const key of ['apiTokens','externalRefs']) {
+      const missing = structuredClone(f.saved); delete missing.companies[0][key];
+      assert.throws(() => validateCarryStructure(missing), new RegExp(key));
+      await assert.rejects(validateCarryCounts(f.source.pool, missing), new RegExp(key));
+    }
+    const altered = structuredClone(f.saved); altered.companies[0].apiTokens[0].tokenHash = 'b'.repeat(64);
+    await assert.rejects(validateCarryCounts(f.source.pool, altered), /tokenHash/);
+    const seq = async () => (await f.target.pool.query('SELECT last_value,is_called FROM api_token_token_id_seq')).rows;
+    const before = await seq(), preview = await f.apply(f.saved, true);
+    assert.deepEqual(await seq(), before);
+    assert.equal((await f.target.pool.query('SELECT count(*)::int n FROM api_token')).rows[0].n, 0);
+    assert.equal((await f.target.pool.query('SELECT count(*)::int n FROM external_ref')).rows[0].n, 0);
+    assert.equal(preview.planned.filter(r => r.what === 'api token').length, 2);
+    assert.equal(preview.planned.filter(r => r.what === 'external reference').length, 2);
+    const report = await f.apply();
+    assert.equal(report.leftovers.filter(r => ['api_token','external_ref'].includes(r.table)).length, 0);
+    const restored = (await f.target.pool.query('SELECT * FROM api_token ORDER BY token_id')).rows;
+    assert.deepEqual(restored, tokens.map(r => ({ ...r, org_id:f.t.orgId, entity_id:f.t.entityId })));
+    assert.notEqual(f.original.txn_id, f.rebuilt.txn_id);
+    const refs = (await f.target.pool.query('SELECT * FROM external_ref')).rows;
+    assert.equal(refs.length, 2);
+    assert.ok(refs.every(r => r.txn_id === f.rebuilt.txn_id && r.request_hash === 'a'.repeat(64)));
+    assert.equal((await f.target.pool.query('SELECT accept_writes FROM integration_setting')).rows[0].accept_writes, false);
+    const auth = token => authenticateBearer(f.target.pool, { authorization:`Bearer ${token}`, scope:'settlements:read' });
+    assert.equal((await auth(f.active.token)).entityId, f.t.entityId);
+    await assert.rejects(auth(f.revoked.token), { code:'invalid_token' });
+    const next = await mintToken(f.target.pool, { ...f.args, orgId:f.t.orgId, entityId:f.t.entityId });
+    assert.ok(next.tokenId > f.revoked.tokenId, 'sequence must advance past carried public IDs');
+    await revokeToken(f.target.pool, { ...f.args, orgId:f.t.orgId, entityId:f.t.entityId, tokenId:f.active.tokenId });
+    const beforeReplay = (await f.target.pool.query('SELECT * FROM api_token ORDER BY token_id')).rows;
+    const again = await f.apply();
+    assert.deepEqual((await f.target.pool.query('SELECT * FROM api_token ORDER BY token_id')).rows, beforeReplay);
+    await assert.rejects(auth(f.active.token), { code:'invalid_token' });
+    assert.equal((await f.target.pool.query('SELECT count(*)::int n FROM external_ref')).rows[0].n, 2);
+    for (const output of [carryOverReport(f.saved), preview, report, again]) {
+      const text = JSON.stringify(output);
+      assert.ok(!text.includes(f.active.token));
+      assert.ok(!text.includes(co.apiTokens[0].tokenHash));
+      assert.ok(!text.includes('a'.repeat(64)));
+    }
+  } finally { await f.drop(); }
+});
+
+test('unresolved integration links, missing companies and credential collisions remain explicit leftovers', async () => {
+  const f = await integrationCarryFixture();
+  try {
+    const changed = structuredClone(f.saved);
+    changed.companies[0].externalRefs[0].transaction.memo = 'Sample changed accounting identity';
+    changed.companies[0].externalRefs[1].transaction.docNumber = 'Sample missing document';
+    for (const dryRun of [true,false]) {
+      const report = await f.apply(changed, dryRun);
+      assert.equal(report.leftovers.filter(r => r.table === 'external_ref').length, 2);
+      assert.ok(report.leftovers.some(r => /unequal identity/.test(r.why)));
+      assert.ok(report.leftovers.some(r => /no matching transaction/.test(r.why)));
+    }
+    assert.equal((await f.target.pool.query('SELECT count(*)::int n FROM external_ref')).rows[0].n, 0);
+    await f.target.pool.query('UPDATE api_token SET token_hash=$1 WHERE token_id=$2', [Buffer.alloc(32,9),f.active.tokenId]);
+    const report = await f.apply();
+    assert.ok(report.leftovers.some(r => r.table === 'api_token' && /conflict/i.test(r.why)));
+    assert.deepEqual((await f.target.pool.query('SELECT token_hash FROM api_token WHERE token_id=$1',[f.active.tokenId])).rows[0].token_hash, Buffer.alloc(32,9));
+    await f.target.pool.query("UPDATE external_ref SET request_hash=$1 WHERE source='sample_connector'", ['b'.repeat(64)]);
+    await f.target.pool.query("UPDATE external_ref SET source_ref='invoice:different' WHERE source='sample_other'");
+    assert.equal((await f.apply()).leftovers.filter(r => r.table === 'external_ref').length, 2);
+    assert.equal((await f.target.pool.query('SELECT count(*)::int n FROM external_ref')).rows[0].n, 2);
+    const missing = structuredClone(f.saved); missing.companies[0].name = 'Sample missing company';
+    for (const dryRun of [true,false]) {
+      const leftovers = (await f.apply(missing, dryRun)).leftovers;
+      for (const table of ['api_token','external_ref']) assert.equal(leftovers.find(r => r.table === table).rows, 2);
+    }
+    // NULL document numbers allow two real candidates without bypassing schema constraints.
+    await f.target.pool.query('UPDATE txn SET doc_number=NULL WHERE txn_id=$1', [f.rebuilt.txn_id]);
+    await f.target.pool.query(`INSERT INTO txn(org_id,entity_id,type,txn_date,due_date,customer_id,total_cents,open_cents)
+      SELECT org_id,entity_id,type,txn_date,due_date,customer_id,total_cents,open_cents FROM txn WHERE txn_id=$1`, [f.rebuilt.txn_id]);
+    const ambiguous = structuredClone(f.saved);
+    for (const ref of ambiguous.companies[0].externalRefs) ref.transaction.docNumber = null;
+    assert.equal((await f.apply(ambiguous)).leftovers.filter(r => r.table === 'external_ref' && /ambiguous/.test(r.why)).length, 2);
+  } finally { await f.drop(); }
 });

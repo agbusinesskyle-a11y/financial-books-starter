@@ -3,6 +3,8 @@ import { isPractice, checkBooksMode, practiceBanner } from '../../lib/domain/pra
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { createPool } from '../../lib/db.js';
+import { integrationRoutes } from './integration-routes.js';
+import { integrationSettingsRoutes } from './integration-settings-routes.js';
 import { HttpError, idParam, clientIp, tooMany } from './http.js';
 import {
   isDemo, checkDemoMode, demoBanner, demoBlock, demoPublicBlock, DEMO_ACTOR, DEMO_ROBOTS, DEMO_UPLOADS_OFF, DEMO_WRITES_PER_IP, DEMO_WRITES_ALL,
@@ -404,6 +406,9 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
       throw new HttpError(405, 'Method not allowed');
     }
 
+    if (path === '/api/integration/v1' || path.startsWith('/api/integration/v1/')) {
+      return integrationRoutes({ req, res, path, url, pool, env, now });
+    }
     const { session, setCookie } = auth.current(req);
     if (!session) {
       if (req.method === 'GET') return redirect(res, `/login?next=${encodeURIComponent(path + url.search)}`);
@@ -1151,6 +1156,7 @@ export function createApp({ pool, env = process.env, now = () => new Date(), mai
 
     // ---- settings: terms, products and services, late fees ----
     const settingsPage = (tab, body, status = 200, flash = takeFlash()) => page(settingsLayout({ ...base(), flash, tab, body }), status);
+    if (await integrationSettingsRoutes({ ...helpers, settingsPage, session })) return;
     if (await salesSettingsRoutes({ ...helpers, settingsPage })) return;
     if (await accountingRoutes({ ...helpers, settingsPage })) return;
     if (await paymentsSettingsRoutes({ ...helpers, settingsPage })) return;
